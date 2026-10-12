@@ -1,6 +1,7 @@
 package com.rotacard.app
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -21,15 +22,26 @@ class CardService : AccessibilityService() {
     private var card: LinearLayout? = null
     private var big: TextView? = null
     private var small: TextView? = null
+    private var dbg: TextView? = null
     private val handler = Handler(Looper.getMainLooper())
     private var scanPending = false
     private var hidePending = false
+    private var running = false
+    private var lastSaved = ""
 
     private val scanRunnable = Runnable { scanPending = false; scan() }
     private val hideRunnable = Runnable { hidePending = false; removeCard() }
+    private val loopRunnable = object : Runnable {
+        override fun run() {
+            scan()
+            if (running) handler.postDelayed(this, 800)
+        }
+    }
 
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        running = true
+        handler.postDelayed(loopRunnable, 800)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -40,22 +52,67 @@ class CardService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
-    override fun onDestroy() {
+    override fun onUnbind(intent: Intent?): Boolean {
+        running = false
         handler.removeCallbacksAndMessages(null)
-        removeCard()
+        removeCard(); removeDbg()
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        running = false
+        handler.removeCallbacksAndMessages(null)
+        removeCard(); removeDbg()
         super.onDestroy()
     }
 
     private fun scan() {
+        if (!::wm.isInitialized) return
+        val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        val debug = prefs.getBoolean("debug", true)
         val sb = StringBuilder()
+        var wins = 0
+        var texts = 0
+        var err = ""
+        val pkgs = LinkedHashSet<String>()
         try {
             for (w in windows) {
+                wins++
                 val root = w.root ?: continue
-                if (root.packageName?.toString() == packageName) continue
-                collect(root, sb)
+                val pk = root.packageName?.toString() ?: "?"
+                if (pk == packageName) continue
+                pkgs.add(pk)
+                texts += collect(root, sb)
             }
-        } catch (_: Exception) { }
-        val offer = Parser.parse(sb.toString())
+        } catch (e: Exception) {
+            err = e.javaClass.simpleName
+        }
+        if (sb.isEmpty()) {
+            try {
+                rootInActiveWindow?.let { r ->
+                    pkgs.add("ativo:" + r.packageName)
+                    texts += collect(r, sb)
+                }
+            } catch (e: Exception) {
+                err += " " + e.javaClass.simpleName
+            }
+        }
+        val text = sb.toString()
+        val offer = Parser.parse(text)
+
+        if (debug) {
+            if ((text.contains("R$") && (text.contains("min") || text.contains("Embarque"))) && text != lastSaved) {
+                lastSaved = text
+                prefs.edit().putString("last", text.take(2500)).apply()
+            }
+            val msg = "janelas=$wins textos=$texts R$=${text.contains("R$")} " +
+                    (if (offer != null) "LEU OFERTA" else "sem oferta") + " $err\n" +
+                    pkgs.joinToString(" | ")
+            showDbg(msg)
+        } else {
+            removeDbg()
+        }
+
         if (offer != null) {
             handler.removeCallbacks(hideRunnable); hidePending = false
             showCard(offer)
@@ -65,16 +122,46 @@ class CardService : AccessibilityService() {
         }
     }
 
-    private fun collect(n: AccessibilityNodeInfo, sb: StringBuilder) {
-        n.text?.let { sb.append(it).append('\n') }
-        n.contentDescription?.let { sb.append(it).append('\n') }
+    private fun collect(n: AccessibilityNodeInfo, sb: StringBuilder): Int {
+        var c = 0
+        n.text?.let { sb.append(it).append('\n'); c++ }
+        n.contentDescription?.let { sb.append(it).append('\n'); c++ }
         for (i in 0 until n.childCount) {
-            val c = n.getChild(i) ?: continue
-            collect(c, sb)
+            val ch = n.getChild(i) ?: continue
+            c += collect(ch, sb)
         }
+        return c
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun overlayParams(yDp: Int) = WindowManager.LayoutParams(
+        (resources.displayMetrics.widthPixels * 0.92).toInt(),
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT
+    ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(yDp) }
+
+    private fun showDbg(msg: String) {
+        if (dbg == null) {
+            val t = TextView(this).apply {
+                setTextColor(Color.WHITE); textSize = 10f
+                setBackgroundColor(Color.parseColor("#CC000000"))
+                setPadding(dp(6), dp(3), dp(6), dp(3))
+            }
+            try { wm.addView(t, overlayParams(120)) } catch (_: Exception) { return }
+            dbg = t
+        }
+        dbg?.text = msg
+    }
+
+    private fun removeDbg() {
+        dbg?.let { try { wm.removeView(it) } catch (_: Exception) { } }
+        dbg = null
+    }
 
     private fun showCard(o: Offer) {
         val p = getSharedPreferences("cfg", MODE_PRIVATE)
@@ -110,16 +197,7 @@ class CardService : AccessibilityService() {
                 setPadding(dp(16), dp(10), dp(16), dp(10))
                 addView(b); addView(s)
             }
-            val lp = WindowManager.LayoutParams(
-                (resources.displayMetrics.widthPixels * 0.92).toInt(),
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(36) }
-            try { wm.addView(c, lp) } catch (_: Exception) { return }
+            try { wm.addView(c, overlayParams(36)) } catch (_: Exception) { return }
             card = c; big = b; small = s
         }
         card?.background = GradientDrawable().apply {

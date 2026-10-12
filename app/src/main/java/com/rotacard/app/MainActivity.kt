@@ -6,8 +6,10 @@ import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
@@ -27,11 +29,17 @@ class MainActivity : Activity() {
         val green = field("Verde", p.getFloat("green", 2.0f))
         val yellow = field("Amarelo", p.getFloat("yellow", 1.5f))
         val rating = field("Nota minima", p.getFloat("minRating", 4.8f))
+        val debug = CheckBox(this).apply {
+            text = "Modo diagnostico (faixa preta no topo)"
+            isChecked = p.getBoolean("debug", true)
+            setOnCheckedChangeListener { _, v -> p.edit().putBoolean("debug", v).apply() }
+        }
+        val lastView = TextView(this).apply { textSize = 11f; setTextIsSelectable(true) }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad * 2, pad, pad)
-            addView(TextView(context).apply { text = "Rota Card"; textSize = 24f })
+            addView(TextView(context).apply { text = "Rota Card v1.1"; textSize = 24f })
             addView(label("Verde a partir de R$/km:")); addView(green)
             addView(label("Amarelo a partir de R$/km (abaixo disso fica vermelho):")); addView(yellow)
             addView(label("Nota minima do passageiro (abaixo aparece ⚠):")); addView(rating)
@@ -54,11 +62,15 @@ class MainActivity : Activity() {
                 text = "Ativar servico de acessibilidade"
                 setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
             })
-            addView(TextView(context).apply {
-                text = "Em Acessibilidade > Apps instalados, ative \"Rota Card\"."
-                setPadding(0, pad, 0, 0)
+            addView(debug)
+            addView(Button(context).apply {
+                text = "Ver ultimo texto lido da oferta"
+                setOnClickListener {
+                    lastView.text = p.getString("last", "(nada lido ainda)")
+                }
             })
+            addView(lastView)
         }
-        setContentView(root)
+        setContentView(ScrollView(this).apply { addView(root) })
     }
 }
