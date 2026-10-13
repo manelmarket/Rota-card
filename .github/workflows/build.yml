@@ -1,7 +1,10 @@
 name: Build APK
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,8 +17,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.9
-      - run: gradle assembleDebug --no-daemon
+      - name: Definir versao
+        run: echo "VERCODE=$((100 + GITHUB_RUN_NUMBER))" >> $GITHUB_ENV
+      - run: gradle assembleDebug --no-daemon -PverCode=$VERCODE
+      - name: Renomear APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk RotaCard.apk
       - uses: actions/upload-artifact@v4
         with:
           name: RotaCard-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: RotaCard.apk
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ env.VERCODE }}
+          name: Rota Card build ${{ env.VERCODE }}
+          files: RotaCard.apk
+          make_latest: true

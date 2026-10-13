@@ -1,19 +1,29 @@
 package com.rotacard.app
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.view.Display
 import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.Locale
 
 class CardService : AccessibilityService() {
@@ -27,7 +37,14 @@ class CardService : AccessibilityService() {
     private var scanPending = false
     private var hidePending = false
     private var running = false
-    private var lastSaved = ""
+
+    // OCR (99)
+    private var ocrBusy = false
+    private var lastOcrAt = 0L
+    private var ocrOffer: Offer? = null
+    private var ocrAt = 0L
+    private var ocrState = "-"
+    private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
     private val scanRunnable = Runnable { scanPending = false; scan() }
     private val hideRunnable = Runnable { hidePending = false; removeCard() }
@@ -69,11 +86,21 @@ class CardService : AccessibilityService() {
     private fun scan() {
         if (!::wm.isInitialized) return
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        if (!prefs.getBoolean("enabled", true)) {
+            removeCard(); removeDbg()
+            ocrOffer = null
+            return
+        }
         val debug = prefs.getBoolean("debug", true)
-        val sb = StringBuilder()
+        val dm = resources.displayMetrics
+        val r = Rect()
         var wins = 0
         var texts = 0
         var err = ""
+        var offer: Offer? = null
+        var parsedText = ""
+        var failText = ""
+        var big99 = false
         val pkgs = LinkedHashSet<String>()
         try {
             for (w in windows) {
@@ -82,44 +109,107 @@ class CardService : AccessibilityService() {
                 val pk = root.packageName?.toString() ?: "?"
                 if (pk == packageName) continue
                 pkgs.add(pk)
-                texts += collect(root, sb)
+                val one = StringBuilder()
+                texts += collect(root, one)
+                val t = one.toString()
+                if (offer == null) {
+                    val o = Parser.parse(t)
+                    if (o != null) { offer = o; parsedText = t }
+                    else if ((pk.contains("ubercab") || pk.contains("easymob")) &&
+                        t.contains("R$") && t.contains("km")) failText = t
+                }
+                if (pk == "com.app99.driver") {
+                    w.getBoundsInScreen(r)
+                    if (r.height() > dm.heightPixels * 0.35) big99 = true
+                }
             }
         } catch (e: Exception) {
             err = e.javaClass.simpleName
         }
-        if (sb.isEmpty()) {
+        if (offer == null && wins == 0) {
             try {
-                rootInActiveWindow?.let { r ->
-                    pkgs.add("ativo:" + r.packageName)
-                    texts += collect(r, sb)
+                rootInActiveWindow?.let { rt ->
+                    pkgs.add("ativo:" + rt.packageName)
+                    val one = StringBuilder()
+                    texts += collect(rt, one)
+                    val o = Parser.parse(one.toString())
+                    if (o != null) { offer = o; parsedText = one.toString() }
                 }
             } catch (e: Exception) {
                 err += " " + e.javaClass.simpleName
             }
         }
-        val text = sb.toString()
-        val offer = Parser.parse(text)
+
+        // 99: o app nao expoe o texto da oferta, entao le por imagem (OCR)
+        if (offer == null && big99 && prefs.getBoolean("ocr99", true)) runOcr(prefs.getBoolean("debug", true))
+        val shown = offer ?: (if (SystemClock.uptimeMillis() - ocrAt < 3000) ocrOffer else null)
 
         if (debug) {
-            if ((text.contains("R$") && (text.contains("min") || text.contains("Embarque"))) && text != lastSaved) {
-                lastSaved = text
-                prefs.edit().putString("last", text.take(2500)).apply()
-            }
-            val msg = "janelas=$wins textos=$texts R$=${text.contains("R$")} " +
-                    (if (offer != null) "LEU OFERTA" else "sem oferta") + " $err\n" +
-                    pkgs.joinToString(" | ")
-            showDbg(msg)
+            if (parsedText.isNotEmpty()) prefs.edit().putString("last", parsedText.take(2500)).apply()
+            if (offer == null && failText.isNotEmpty()) prefs.edit().putString("fail", failText.take(2500)).apply()
+            val src = if (offer != null) "LEU OFERTA" else if (shown != null) "LEU OFERTA (OCR)" else "sem oferta"
+            showDbg(
+                "janelas=$wins textos=$texts $src $err 99grande=$big99 ocr=$ocrState\n" +
+                        pkgs.joinToString(" | ")
+            )
         } else {
             removeDbg()
         }
 
-        if (offer != null) {
+        if (shown != null) {
             handler.removeCallbacks(hideRunnable); hidePending = false
-            showCard(offer)
+            showCard(shown)
         } else if (card != null && !hidePending) {
             hidePending = true
-            handler.postDelayed(hideRunnable, 1500)
+            handler.postDelayed(hideRunnable, 2500)
         }
+    }
+
+    private fun runOcr(debug: Boolean) {
+        if (Build.VERSION.SDK_INT < 30) { ocrState = "android<11"; return }
+        if (ocrBusy) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastOcrAt < 1500) return
+        lastOcrAt = now
+        ocrBusy = true
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    try {
+                        val hw = result.hardwareBuffer
+                        val hwBmp = Bitmap.wrapHardwareBuffer(hw, result.colorSpace)
+                        val sw = hwBmp?.copy(Bitmap.Config.ARGB_8888, false)
+                        hw.close()
+                        if (sw == null) { ocrBusy = false; ocrState = "bmp-null"; return }
+                        val top = (sw.height * 0.40).toInt()
+                        val crop = Bitmap.createBitmap(sw, 0, top, sw.width, sw.height - top)
+                        recognizer.process(InputImage.fromBitmap(crop, 0))
+                            .addOnSuccessListener { vt ->
+                                ocrBusy = false
+                                onOcrText(vt.text, debug)
+                            }
+                            .addOnFailureListener { ocrBusy = false; ocrState = "falhou" }
+                    } catch (e: Exception) {
+                        ocrBusy = false; ocrState = "erro-" + e.javaClass.simpleName
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    ocrBusy = false; ocrState = "shot-erro$errorCode"
+                }
+            })
+        } catch (e: Exception) {
+            ocrBusy = false; ocrState = "erro-" + e.javaClass.simpleName
+        }
+    }
+
+    private fun onOcrText(text: String, debug: Boolean) {
+        if (debug && text.contains("R$")) {
+            getSharedPreferences("cfg", MODE_PRIVATE).edit().putString("ocr", text.take(2500)).apply()
+        }
+        ocrOffer = Parser.parse(text, ocr = true)
+        ocrAt = SystemClock.uptimeMillis()
+        ocrState = if (ocrOffer != null) "ok" else "sem-oferta"
     }
 
     private fun collect(n: AccessibilityNodeInfo, sb: StringBuilder): Int {
