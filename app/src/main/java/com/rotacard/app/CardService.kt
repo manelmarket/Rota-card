@@ -24,6 +24,11 @@ import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.RelativeSizeSpan
+import android.util.TypedValue
+import android.view.ViewGroup
 import java.util.Locale
 
 class CardService : AccessibilityService() {
@@ -268,24 +273,37 @@ class CardService : AccessibilityService() {
             String.format(Locale.US, "★ %.2f", it) + if (it < minRating) " ⚠" else ""
         } ?: "★ --"
 
-        val bigTxt = String.format(Locale.US, "R$ %.2f/km", o.perKm).replace('.', ',')
+        val til = if (o.minEstimated) "~" else ""
+        val bigTxt = SpannableStringBuilder(
+            String.format(Locale.US, "R$ %.2f/km", o.perKm).replace('.', ',')
+        )
+        o.perHour?.let { h ->
+            val start = bigTxt.length
+            bigTxt.append("  •  " + til + String.format(Locale.US, "R$ %.0f/h", h))
+            bigTxt.setSpan(RelativeSizeSpan(0.78f), start, bigTxt.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
         val smallTxt = String.format(
-            Locale.US, "%s  •  %.1f km  •  R$ %.2f  •  %s",
-            ratingTxt, o.totalKm, o.price, o.app
+            Locale.US, "%s  •  %.1f km  •  %s%.0f min  •  R$ %.2f  •  %s",
+            ratingTxt, o.totalKm, til, o.totalMin, o.price, o.app
         ).replace('.', ',')
 
         if (card == null) {
             val b = TextView(this).apply {
                 setTextColor(Color.WHITE); textSize = 26f
                 setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
+                maxLines = 1
+                setAutoSizeTextTypeUniformWithConfiguration(16, 26, 1, TypedValue.COMPLEX_UNIT_SP)
             }
             val s = TextView(this).apply {
                 setTextColor(Color.WHITE); textSize = 14f; gravity = Gravity.CENTER
+                maxLines = 1
+                setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, TypedValue.COMPLEX_UNIT_SP)
             }
             val c = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(16), dp(10), dp(16), dp(10))
-                addView(b); addView(s)
+                addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                addView(s, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             }
             try { wm.addView(c, overlayParams(36)) } catch (_: Exception) { return }
             card = c; big = b; small = s
