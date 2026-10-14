@@ -289,9 +289,18 @@ class CardService : AccessibilityService() {
             }
             try { wm.addView(c, overlayParams(36)) } catch (_: Exception) { return }
             card = c; big = b; small = s
+            c.alpha = 0f
+            c.translationY = -dp(14).toFloat()
+            c.animate().alpha(1f).translationY(0f).setDuration(180).start()
         }
-        card?.background = GradientDrawable().apply {
-            setColor(color); cornerRadius = dp(16).toFloat()
+        val dark = Color.rgb(
+            (Color.red(color) * 0.68f).toInt(),
+            (Color.green(color) * 0.68f).toInt(),
+            (Color.blue(color) * 0.68f).toInt()
+        )
+        card?.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(color, dark)).apply {
+            cornerRadius = dp(22).toFloat()
+            setStroke(dp(1), Color.argb(80, 255, 255, 255))
         }
         big?.text = bigTxt
         small?.text = smallTxt
