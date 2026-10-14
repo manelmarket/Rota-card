@@ -48,6 +48,8 @@ class MainActivity : Activity() {
     private val AMBER = Color.parseColor("#F59E0B")
     private val RED = Color.parseColor("#EF4444")
 
+    private val REPO = "manelmarket/Rota-card"
+
     private lateinit var prefs: SharedPreferences
     private lateinit var power: PowerView
     private lateinit var scale: ScaleView
@@ -366,8 +368,8 @@ class MainActivity : Activity() {
 
         // ---- cabecalho
         val title = TextView(this).apply {
-            val sb = SpannableStringBuilder("Rota Card")
-            sb.setSpan(ForegroundColorSpan(CYAN), 5, 9, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val sb = SpannableStringBuilder("Rota Boa, Manel")
+            sb.setSpan(ForegroundColorSpan(CYAN), 10, 15, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             text = sb
             textSize = 28f
             setTextColor(TEXT)
@@ -459,17 +461,12 @@ class MainActivity : Activity() {
         }
 
         // ---- atualizacao
-        val repo = input(prefs.getString("repo", "manelmarket/Rota-card") ?: "", "usuario/repositorio", false)
         updStatus = tv("", 13f, MUTED)
         updBtn = button("Verificar atualização", true) {
-            val r = repo.text.toString().trim()
-            prefs.edit().putString("repo", r).apply()
             val url = pendingUrl
-            if (url != null) downloadAndInstall(url) else checkUpdate(r, true)
+            if (url != null) downloadAndInstall(url) else checkUpdate(REPO, true)
         }
         val update = card("Atualização") {
-            addView(tv("Repositório no GitHub", 12f, MUTED), lp(bottom = 6))
-            addView(repo, lp(bottom = 12))
             addView(updBtn, lp(bottom = 10))
             addView(updStatus, lp())
         }
@@ -546,6 +543,6 @@ class MainActivity : Activity() {
             .setInterpolator(OvershootInterpolator(1.6f)).setDuration(650).start()
         scale.postDelayed({ updateScale(true) }, 350)
 
-        checkUpdate(repo.text.toString().trim(), false)
+        checkUpdate(REPO, false)
     }
 }
