@@ -369,39 +369,57 @@ class CardService : AccessibilityService() {
         } else {
             takeShot { b ->
                 if (b != null) saveShot(b, o, label)
-                else handler.postDelayed({ takeShot { b2 -> if (b2 != null) saveShot(b2, o, label) } }, 450)
+                else handler.postDelayed({ takeShot { b2 -> saveShot(b2, o, label) } }, 450)
             }
         }
     }
 
-    /** Salva na galeria: Pictures/RotaCard (nao precisa de permissao). */
-    private fun saveShot(bmp: Bitmap, o: Offer?, label: String) {
+    /** Salva o print na galeria (Pictures/RotaCard), guarda uma copia menor no app e registra no historico. */
+    private fun saveShot(bmp: Bitmap?, o: Offer?, label: String) {
+        val id = System.currentTimeMillis()
         Thread {
-            try {
-                val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-                val info = if (o != null) String.format(Locale.US, "_R%.2f_%.2fkm", o.price, o.perKm) else ""
-                val name = "Corrida_${ts}_$label$info.jpg"
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/RotaCard")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
+            var gallery: String? = null
+            var thumb: String? = null
+            var err: String? = null
+            if (bmp != null) {
+                try {
+                    val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(id))
+                    val info = if (o != null) String.format(Locale.US, "_R%.2f_%.2fkm", o.price, o.perKm) else ""
+                    val name = "Corrida_${ts}_$label$info.jpg"
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/RotaCard")
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) {
+                        contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+                        values.clear()
+                        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                        contentResolver.update(uri, values, null, null)
+                        gallery = uri.toString()
+                    }
+                } catch (e: Exception) {
+                    err = e.javaClass.simpleName
                 }
-                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                if (uri == null) {
-                    handler.post { Toast.makeText(this, "Não consegui criar o arquivo do print", Toast.LENGTH_LONG).show() }
-                    return@Thread
-                }
-                contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                contentResolver.update(uri, values, null, null)
-                handler.post { Toast.makeText(this, "Corrida salva na galeria (RotaCard)", Toast.LENGTH_SHORT).show() }
-            } catch (e: Exception) {
-                handler.post {
-                    Toast.makeText(this, "Falha ao salvar o print: " + e.javaClass.simpleName, Toast.LENGTH_LONG).show()
-                }
+                try {
+                    val w = 540
+                    val h = (bmp.height * w.toFloat() / bmp.width).toInt()
+                    val small = Bitmap.createScaledBitmap(bmp, w, h, true)
+                    val f = History.shotFile(this, "$id.jpg")
+                    f.parentFile?.mkdirs()
+                    f.outputStream().use { small.compress(Bitmap.CompressFormat.JPEG, 82, it) }
+                    thumb = "$id.jpg"
+                } catch (_: Exception) { }
             }
+            if (label != "Teste") History.add(this, Ride.from(o, id, label, thumb, gallery))
+            val msg = when {
+                bmp == null -> "Aceite detectado, mas não consegui tirar o print"
+                gallery == null && thumb == null -> "Falha ao salvar o print" + (err?.let { ": $it" } ?: "")
+                else -> "Corrida salva (galeria: RotaCard)"
+            }
+            handler.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
         }.start()
     }
 

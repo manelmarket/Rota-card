@@ -77,6 +77,9 @@ class MainActivity : Activity() {
     private lateinit var statCount: TextView
     private lateinit var statSub: TextView
     private lateinit var statBest: TextView
+    private lateinit var lastPrice: TextView
+    private lateinit var lastInfo: TextView
+    private lateinit var lastMeta: TextView
     private lateinit var mAvg: TextView
     private lateinit var mHour: TextView
     private lateinit var mBest: TextView
@@ -278,8 +281,40 @@ class MainActivity : Activity() {
     private fun accLine(st: DayStats) =
         if (st.accepted > 0) "\nAceitas hoje: ${st.accepted} • R$ " + fmt2(st.accSum) else ""
 
+    private fun pl(n: Int, one: String, many: String) = "$n " + (if (n == 1) one else many)
+
+    private fun openHistory() {
+        startActivity(Intent(this, HistoryActivity::class.java))
+    }
+
+    private fun refreshLast() {
+        val r = History.last(this)
+        if (r == null) {
+            lastPrice.text = "--"
+            lastMeta.text = "Nenhuma corrida aceita ainda"
+            lastInfo.text = "Quando você aceitar uma, ela aparece aqui."
+            return
+        }
+        val fmtDay = java.text.SimpleDateFormat("yyyyMMdd", Locale.US)
+        val isToday = fmtDay.format(java.util.Date(r.id)) == fmtDay.format(java.util.Date())
+        val whenTxt = if (isToday) java.text.SimpleDateFormat("'hoje' HH:mm", Locale.US).format(java.util.Date(r.id))
+        else java.text.SimpleDateFormat("dd/MM HH:mm", Locale.US).format(java.util.Date(r.id))
+        if (!r.hasData) {
+            lastPrice.text = "--"
+            lastMeta.text = "Oferta não lida (print salvo)"
+            lastInfo.text = r.app + " • " + whenTxt
+            return
+        }
+        lastPrice.text = Fmt.money(r.price)
+        val h = r.perHour
+        lastMeta.text = "R$ " + Fmt.d2(r.perKm ?: 0.0) + "/km" +
+                (if (h != null) "  •  " + (if (r.minEstimated) "~" else "") + "R$ " + Fmt.n0(h) + "/h" else "")
+        lastInfo.text = Fmt.d1(r.totalKm) + " km • " + r.app + " • " + whenTxt
+    }
+
     private fun refreshStats() {
         if (!::statCount.isInitialized) return
+        refreshLast()
         val st = Stats.load(this)
         statCount.text = st.count.toString()
         if (st.count == 0) {
@@ -292,7 +327,8 @@ class MainActivity : Activity() {
             mAvg.text = "R$ " + fmt2(st.avgKm)
             mHour.text = st.avgHour?.let { "R$ " + it.roundToInt() } ?: "--"
             mBest.text = "R$ " + fmt2(st.bestPerKm)
-            statBest.text = "${st.green} verdes • ${st.yellow} amarelas • ${st.red} vermelhas\n" +
+            statBest.text = pl(st.green, "verde", "verdes") + " • " + pl(st.yellow, "amarela", "amarelas") +
+                    " • " + pl(st.red, "vermelha", "vermelhas") + "\n" +
                     "Melhor: R$ " + fmt2(st.bestPrice) + " em " + fmt1(st.bestDist) + " km (" + st.bestApp + ")" +
                     accLine(st)
             splitBar.set(st.red, st.yellow, st.green)
@@ -721,7 +757,23 @@ class MainActivity : Activity() {
             addView(v)
             addView(tv(label, 11f, MUTED))
         }
+        lastPrice = tv("--", 30f, TEXT).apply {
+            typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+        }
+        lastMeta = tv("", 14f, CYAN, true)
+        lastInfo = tv("", 12f, MUTED)
         val resumo = card("Resumo de hoje") {
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = bg(Color.parseColor("#0C1424"), 16, STROKE)
+                    setPadding(dp(14), dp(10), dp(14), dp(12))
+                    addView(tv("Última corrida aceita", 12f, MUTED))
+                    addView(lastPrice)
+                    addView(lastMeta)
+                    addView(lastInfo)
+                }, lp(bottom = 14)
+            )
             addView(
                 LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -744,11 +796,15 @@ class MainActivity : Activity() {
                 }, lp(top = 12, bottom = 8)
             )
             addView(statBest, lp(bottom = 8))
+            addView(button("Ver histórico completo  ›", true) { openHistory() }, lp(top = 4))
             addView(button("Zerar resumo", false) {
                 Stats.clear(this@MainActivity)
                 refreshStats()
             }, lp(top = 4))
         }
+
+        resumo.isClickable = true
+        resumo.setOnClickListener { openHistory() }
 
         // ---- menu lateral: personalizar cartao
         drawerW = minOf((resources.displayMetrics.widthPixels * 0.92f).toInt(), dp(440))
