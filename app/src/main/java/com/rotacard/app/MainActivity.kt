@@ -23,7 +23,12 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
+import android.os.Handler
+import android.os.Looper
+import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.SeekBar
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
@@ -34,6 +39,8 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
 
@@ -64,6 +71,38 @@ class MainActivity : Activity() {
     private lateinit var updBtn: TextView
     private var pendingUrl: String? = null
     private val animators = mutableListOf<ObjectAnimator>()
+    private val handler = Handler(Looper.getMainLooper())
+
+    // resumo do dia
+    private lateinit var statCount: TextView
+    private lateinit var statSub: TextView
+    private lateinit var statBest: TextView
+    private lateinit var mAvg: TextView
+    private lateinit var mHour: TextView
+    private lateinit var mBest: TextView
+    private lateinit var splitBar: SplitBarView
+    private val tick = object : Runnable {
+        override fun run() {
+            refreshStats()
+            handler.postDelayed(this, 3000)
+        }
+    }
+
+    // menu lateral
+    private lateinit var drawer: ScrollView
+    private lateinit var scrim: View
+    private lateinit var previewUi: CardUi
+    private lateinit var segTop: TextView
+    private lateinit var segBottom: TextView
+    private lateinit var seekSize: SeekBar
+    private lateinit var seekOpacity: SeekBar
+    private lateinit var tvSize: TextView
+    private lateinit var tvOpacity: TextView
+    private lateinit var vibSwitch: Switch
+    private val chipViews = ArrayList<TextView>()
+    private var previewLevel = 0
+    private var drawerOpen = false
+    private var drawerW = 0
 
     // ------------------------------------------------------------------ helpers de UI
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -218,11 +257,138 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::a11yText.isInitialized) refreshA11y()
+        handler.removeCallbacks(tick)
+        handler.post(tick)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(tick)
+        super.onPause()
     }
 
     override fun onDestroy() {
         animators.forEach { it.cancel() }
         super.onDestroy()
+    }
+
+    // ------------------------------------------------------------------ resumo do dia
+    private fun fmt2(v: Double) = String.format(Locale.US, "%.2f", v).replace('.', ',')
+    private fun fmt1(v: Double) = String.format(Locale.US, "%.1f", v).replace('.', ',')
+
+    private fun accLine(st: DayStats) =
+        if (st.accepted > 0) "\nAceitas hoje: ${st.accepted} • R$ " + fmt2(st.accSum) else ""
+
+    private fun refreshStats() {
+        if (!::statCount.isInitialized) return
+        val st = Stats.load(this)
+        statCount.text = st.count.toString()
+        if (st.count == 0) {
+            statSub.text = "nenhuma oferta lida hoje"
+            mAvg.text = "--"; mHour.text = "--"; mBest.text = "--"
+            statBest.text = "As ofertas aparecem aqui conforme o app as lê." + accLine(st)
+            splitBar.set(0, 0, 0)
+        } else {
+            statSub.text = if (st.count == 1) "oferta vista hoje" else "ofertas vistas hoje"
+            mAvg.text = "R$ " + fmt2(st.avgKm)
+            mHour.text = st.avgHour?.let { "R$ " + it.roundToInt() } ?: "--"
+            mBest.text = "R$ " + fmt2(st.bestPerKm)
+            statBest.text = "${st.green} verdes • ${st.yellow} amarelas • ${st.red} vermelhas\n" +
+                    "Melhor: R$ " + fmt2(st.bestPrice) + " em " + fmt1(st.bestDist) + " km (" + st.bestApp + ")" +
+                    accLine(st)
+            splitBar.set(st.red, st.yellow, st.green)
+        }
+    }
+
+    // ------------------------------------------------------------------ menu lateral
+    private fun openDrawer() {
+        drawerOpen = true
+        updatePreview()
+        scrim.visibility = View.VISIBLE
+        scrim.animate().alpha(1f).setDuration(220).start()
+        drawer.animate().translationX(0f).setDuration(260).setInterpolator(DecelerateInterpolator()).start()
+    }
+
+    private fun closeDrawer() {
+        drawerOpen = false
+        scrim.animate().alpha(0f).setDuration(200).withEndAction { scrim.visibility = View.GONE }.start()
+        drawer.animate().translationX(-drawerW.toFloat()).setDuration(220).start()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (drawerOpen) closeDrawer() else super.onBackPressed()
+    }
+
+    private fun pct(v: Float) = "${(v * 100).roundToInt()}%"
+
+    private fun refreshSeg() {
+        val bottom = prefs.getBoolean("atBottom", false)
+        fun style(t: TextView, selected: Boolean) {
+            if (selected) {
+                t.setTextColor(Color.parseColor("#04121A"))
+                t.background = GradientDrawable(
+                    GradientDrawable.Orientation.LEFT_RIGHT,
+                    intArrayOf(CYAN, Color.parseColor("#3B82F6"))
+                ).apply { cornerRadius = dp(12).toFloat() }
+            } else {
+                t.setTextColor(TEXT)
+                t.background = null
+            }
+        }
+        style(segTop, !bottom)
+        style(segBottom, bottom)
+    }
+
+    private fun updatePreview() {
+        if (!::previewUi.isInitialized) return
+        val st = CardPrefs.load(this)
+        previewUi.bind(CardPrefs.sample(previewLevel, st), st)
+        previewUi.root.alpha = st.opacity
+        val cols = intArrayOf(GREEN, AMBER, RED)
+        chipViews.forEachIndexed { i, c ->
+            val col = cols[i]
+            val sel = i == previewLevel
+            c.background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(if (sel) Color.argb(50, Color.red(col), Color.green(col), Color.blue(col)) else Color.TRANSPARENT)
+                setStroke(dp(1), if (sel) col else STROKE)
+            }
+        }
+    }
+
+    private fun styledSeek(max: Int, progress: Int, onChange: (Int) -> Unit): SeekBar =
+        SeekBar(this).apply {
+            this.max = max
+            this.progress = progress
+            progressTintList = ColorStateList.valueOf(CYAN)
+            thumbTintList = ColorStateList.valueOf(CYAN)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.parseColor("#2A3550"))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) onChange(p)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+
+    private fun labelValueRow(label: String, value: TextView): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(tv(label, 14f, TEXT, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(value)
+        }
+
+    private fun resetCardPrefs() {
+        prefs.edit().remove("textScale").remove("opacity").remove("atBottom").remove("vibrate").apply()
+        seekSize.progress = 4
+        seekOpacity.progress = 12
+        tvSize.text = pct(1.0f)
+        tvOpacity.text = pct(1.0f)
+        vibSwitch.isChecked = true
+        refreshSeg()
+        updatePreview()
     }
 
     // ------------------------------------------------------------------ atualizacao online
@@ -380,9 +546,24 @@ class MainActivity : Activity() {
             background = bg(Color.parseColor("#141E36"), 14, STROKE)
             setPadding(dp(10), dp(5), dp(10), dp(5))
         }
+        val menuBtn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = bg(SURFACE, 14, STROKE)
+            for (i in 0..2) {
+                addView(
+                    View(context).apply { setBackgroundColor(TEXT) },
+                    LinearLayout.LayoutParams(dp(18), dp(2)).apply { topMargin = if (i == 0) 0 else dp(4) }
+                )
+            }
+            isClickable = true
+            setOnClickListener { openDrawer() }
+            pressable(this)
+        }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            addView(menuBtn, LinearLayout.LayoutParams(dp(42), dp(42)).apply { rightMargin = dp(12) })
             addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(chip)
         }
@@ -454,6 +635,15 @@ class MainActivity : Activity() {
             }, lp())
             addView(switchRow("Faixa preta de diagnóstico", prefs.getBoolean("debug", true)) {
                 prefs.edit().putBoolean("debug", it).apply()
+            }, lp())
+            addView(switchRow("Salvar print ao aceitar corrida", prefs.getBoolean("saveAccepted", true)) {
+                prefs.edit().putBoolean("saveAccepted", it).apply()
+            }, lp())
+            addView(tv("Fica na galeria, no álbum RotaCard (pasta Pictures/RotaCard).", 12f, MUTED), lp(bottom = 8))
+            addView(button("Testar salvar print", false) {
+                val svc = CardService.instance
+                if (svc != null) svc.saveTest()
+                else Toast.makeText(this@MainActivity, "Ative o serviço de acessibilidade primeiro", Toast.LENGTH_LONG).show()
             }, lp(bottom = 8))
             addView(button("Abrir ajustes de acessibilidade", false) {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -485,6 +675,7 @@ class MainActivity : Activity() {
             addView(viewBtn("Último texto lido (Uber e Easymob)", "last"), lp(top = 12))
             addView(viewBtn("Último texto que falhou", "fail"), lp(top = 8))
             addView(viewBtn("Último texto do OCR (99)", "ocr"), lp(top = 8))
+            addView(viewBtn("Últimos toques (Uber, 99, Easymob)", "clicks"), lp(top = 8))
             addView(out, lp(top = 12))
         }
         val arrow = tv("▾", 18f, MUTED)
@@ -515,21 +706,189 @@ class MainActivity : Activity() {
             addView(diagBody)
         }
 
+        // ---- resumo do dia
+        statCount = tv("0", 34f, TEXT).apply {
+            typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+        }
+        statSub = tv("ofertas vistas hoje", 13f, MUTED)
+        mAvg = tv("--", 18f, TEXT, true)
+        mHour = tv("--", 18f, TEXT, true)
+        mBest = tv("--", 18f, TEXT, true)
+        statBest = tv("", 12f, MUTED)
+        splitBar = SplitBarView(this)
+        fun metric(v: TextView, label: String) = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(v)
+            addView(tv(label, 11f, MUTED))
+        }
+        val resumo = card("Resumo de hoje") {
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.BOTTOM
+                    addView(statCount)
+                    addView(
+                        statSub,
+                        LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                            .apply { leftMargin = dp(10); bottomMargin = dp(6) }
+                    )
+                }, lp(bottom = 12)
+            )
+            addView(splitBar, lp(bottom = 4))
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(metric(mAvg, "média R$/km"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(metric(mHour, "média R$/h"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(metric(mBest, "melhor R$/km"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                }, lp(top = 12, bottom = 8)
+            )
+            addView(statBest, lp(bottom = 8))
+            addView(button("Zerar resumo", false) {
+                Stats.clear(this@MainActivity)
+                refreshStats()
+            }, lp(top = 4))
+        }
+
+        // ---- menu lateral: personalizar cartao
+        drawerW = minOf((resources.displayMetrics.widthPixels * 0.92f).toInt(), dp(440))
+        previewUi = CardUi(this)
+        val previewBox = FrameLayout(this).apply {
+            background = bg(Color.parseColor("#0B1220"), 18, STROKE)
+            setPadding(dp(10), dp(14), dp(10), dp(14))
+            addView(
+                previewUi.root,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            )
+        }
+        val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Verde", "Amarelo", "Vermelho").forEachIndexed { i, name ->
+            val col = intArrayOf(GREEN, AMBER, RED)[i]
+            val c = tv(name, 13f, col, true).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(9), dp(8), dp(9))
+                isClickable = true
+                setOnClickListener { previewLevel = i; updatePreview() }
+                pressable(this)
+            }
+            chipViews.add(c)
+            chipRow.addView(c, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { if (i > 0) leftMargin = dp(8) })
+        }
+
+        segTop = tv("Topo", 14f, TEXT, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(11), dp(10), dp(11))
+            isClickable = true
+            setOnClickListener { prefs.edit().putBoolean("atBottom", false).apply(); refreshSeg() }
+        }
+        segBottom = tv("Base", 14f, TEXT, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(11), dp(10), dp(11))
+            isClickable = true
+            setOnClickListener { prefs.edit().putBoolean("atBottom", true).apply(); refreshSeg() }
+        }
+        val seg = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = bg(Color.parseColor("#0C1322"), 14, STROKE)
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            addView(segTop, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(segBottom, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+
+        val scaleNow = prefs.getFloat("textScale", 1.0f)
+        val opNow = prefs.getFloat("opacity", 1.0f)
+        tvSize = tv(pct(scaleNow), 13f, CYAN, true)
+        tvOpacity = tv(pct(opNow), 13f, CYAN, true)
+        seekSize = styledSeek(12, ((scaleNow - 0.8f) / 0.05f).roundToInt().coerceIn(0, 12)) { p ->
+            val v = 0.8f + p * 0.05f
+            prefs.edit().putFloat("textScale", v).apply()
+            tvSize.text = pct(v)
+            updatePreview()
+        }
+        seekOpacity = styledSeek(12, ((opNow - 0.4f) / 0.05f).roundToInt().coerceIn(0, 12)) { p ->
+            val v = 0.4f + p * 0.05f
+            prefs.edit().putFloat("opacity", v).apply()
+            tvOpacity.text = pct(v)
+            updatePreview()
+        }
+        vibSwitch = switchRow("Vibrar em ofertas verdes", prefs.getBoolean("vibrate", true)) {
+            prefs.edit().putBoolean("vibrate", it).apply()
+        }
+
+        val drawerContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(40), dp(18), dp(28))
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(tv("Personalizar cartão", 20f, TEXT, true),
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(tv("✕", 20f, MUTED).apply {
+                        setPadding(dp(12), dp(6), dp(4), dp(6))
+                        isClickable = true
+                        setOnClickListener { closeDrawer() }
+                    })
+                }, lp(bottom = 14)
+            )
+            addView(tv("Prévia ao vivo (aproximada)", 12f, MUTED), lp(bottom = 8))
+            addView(previewBox, lp(bottom = 10))
+            addView(chipRow, lp(bottom = 20))
+            addView(tv("Posição na tela", 14f, TEXT, true), lp(bottom = 8))
+            addView(seg, lp(bottom = 20))
+            addView(labelValueRow("Tamanho da letra", tvSize), lp(bottom = 4))
+            addView(seekSize, lp(bottom = 16))
+            addView(labelValueRow("Transparência", tvOpacity), lp(bottom = 4))
+            addView(seekOpacity, lp(bottom = 16))
+            addView(vibSwitch, lp(bottom = 4))
+            addView(button("Testar vibração", false) { Haptics.pulse(this@MainActivity) }, lp(bottom = 20))
+            addView(button("Testar no celular", true) {
+                val svc = CardService.instance
+                if (svc != null) svc.showTest()
+                else Toast.makeText(this@MainActivity, "Ative o serviço de acessibilidade primeiro", Toast.LENGTH_LONG).show()
+            }, lp(bottom = 8))
+            addView(tv("Mostra o cartão de verdade por 6 segundos. A cada toque troca a cor.", 12f, MUTED), lp(bottom = 16))
+            addView(button("Restaurar padrão", false) { resetCardPrefs() }, lp())
+        }
+        scrim = View(this).apply {
+            setBackgroundColor(Color.parseColor("#99000000"))
+            alpha = 0f
+            visibility = View.GONE
+            setOnClickListener { closeDrawer() }
+        }
+        drawer = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#0E1626"))
+            isClickable = true
+            translationX = -drawerW.toFloat()
+            addView(drawerContent)
+        }
+
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(36), dp(18), dp(28))
             addView(header, lp(bottom = 6))
             addView(hero, lp(bottom = 22))
+            addView(resumo, lp(bottom = 14))
             addView(faixas, lp(bottom = 14))
             addView(leitura, lp(bottom = 14))
             addView(update, lp(bottom = 14))
             addView(diag, lp())
         }
-        setContentView(ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             setBackgroundColor(BG)
             isFillViewport = true
             addView(content)
+        }
+        setContentView(FrameLayout(this).apply {
+            setBackgroundColor(BG)
+            addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(drawer, FrameLayout.LayoutParams(drawerW, ViewGroup.LayoutParams.MATCH_PARENT))
         })
+        refreshSeg()
+        updatePreview()
+        refreshStats()
 
         refreshPower()
         refreshA11y()

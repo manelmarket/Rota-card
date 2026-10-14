@@ -8,8 +8,6 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -19,33 +17,58 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.LinearLayout
 import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import android.text.SpannableStringBuilder
-import android.text.Spanned
-import android.text.style.RelativeSizeSpan
-import android.util.TypedValue
-import android.view.ViewGroup
+import android.content.ContentValues
+import android.provider.MediaStore
+import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 class CardService : AccessibilityService() {
 
+    companion object {
+        @Volatile
+        var instance: CardService? = null
+    }
+
     private lateinit var wm: WindowManager
-    private var card: LinearLayout? = null
-    private var big: TextView? = null
-    private var small: TextView? = null
+    private var cardUi: CardUi? = null
+    private var cardAtBottom = false
     private var dbg: TextView? = null
     private val handler = Handler(Looper.getMainLooper())
     private var scanPending = false
     private var hidePending = false
     private var running = false
 
+    // teste do cartao
+    private var testUntil = 0L
+    private var testIdx = 0
+
+    // contagem e vibracao: so conta a oferta depois de ve-la 2 vezes seguidas com os mesmos numeros
+    private var lastKey = ""
+    private var lastKeyAt = 0L
+    private var candKey = ""
+    private var candCount = 0
+
+    // captura de tela (usada pelo OCR da 99 e pelo print das corridas aceitas)
+    private var shotBusy = false
+    private var lastShotAt = 0L
+    private var lastShot: Bitmap? = null
+    private var lastShotKey: String? = null
+    private var shotErr = 0
+
+    // oferta que estava na tela e deteccao do "Aceitar"
+    private var lastShown: Offer? = null
+    private var lastShownAt = 0L
+    private var lastAcceptKey = ""
+    private var lastAcceptAt = 0L
+    private val clickLog = mutableListOf<String>()
+
     // OCR (99)
-    private var ocrBusy = false
-    private var lastOcrAt = 0L
     private var ocrOffer: Offer? = null
     private var ocrAt = 0L
     private var ocrState = "-"
@@ -53,6 +76,9 @@ class CardService : AccessibilityService() {
 
     private val scanRunnable = Runnable { scanPending = false; scan() }
     private val hideRunnable = Runnable { hidePending = false; removeCard() }
+    private val endTest = Runnable {
+        if (SystemClock.uptimeMillis() >= testUntil - 50) removeCard()
+    }
     private val loopRunnable = object : Runnable {
         override fun run() {
             scan()
@@ -63,10 +89,14 @@ class CardService : AccessibilityService() {
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         running = true
+        instance = this
         handler.postDelayed(loopRunnable, 800)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event != null && event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            try { handleClick(event) } catch (_: Exception) { }
+        }
         if (scanPending) return
         scanPending = true
         handler.postDelayed(scanRunnable, 200)
@@ -76,6 +106,7 @@ class CardService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         running = false
+        if (instance === this) instance = null
         handler.removeCallbacksAndMessages(null)
         removeCard(); removeDbg()
         return super.onUnbind(intent)
@@ -83,13 +114,28 @@ class CardService : AccessibilityService() {
 
     override fun onDestroy() {
         running = false
+        if (instance === this) instance = null
         handler.removeCallbacksAndMessages(null)
         removeCard(); removeDbg()
         super.onDestroy()
     }
 
+    /** Chamado pelo app: mostra um cartao de exemplo de verdade por 6 s (a cada toque troca a cor). */
+    fun showTest() {
+        if (!::wm.isInitialized) return
+        val s = CardPrefs.load(this)
+        val level = testIdx % 3
+        testIdx++
+        testUntil = SystemClock.uptimeMillis() + 6000
+        showCard(CardPrefs.sample(level, s).copy(app = "Teste"))
+        if (level == 0 && s.vibrate) Haptics.pulse(this)
+        handler.removeCallbacks(endTest)
+        handler.postDelayed(endTest, 6000)
+    }
+
     private fun scan() {
         if (!::wm.isInitialized) return
+        if (SystemClock.uptimeMillis() < testUntil) return
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         if (!prefs.getBoolean("enabled", true)) {
             removeCard(); removeDbg()
@@ -146,8 +192,16 @@ class CardService : AccessibilityService() {
         }
 
         // 99: o app nao expoe o texto da oferta, entao le por imagem (OCR)
-        if (offer == null && big99 && prefs.getBoolean("ocr99", true)) runOcr(prefs.getBoolean("debug", true))
+        val needOcr = offer == null && big99 && prefs.getBoolean("ocr99", true)
         val shown = offer ?: (if (SystemClock.uptimeMillis() - ocrAt < 3000) ocrOffer else null)
+        val saveOn = prefs.getBoolean("saveAccepted", true)
+        if (needOcr || (saveOn && shown != null)) capture(needOcr, debug, shown?.let { offerKey(it) })
+        if (shown != null) {
+            lastShown = shown
+            lastShownAt = SystemClock.uptimeMillis()
+        } else if (SystemClock.uptimeMillis() - lastShownAt > 10000) {
+            lastShot = null
+        }
 
         if (debug) {
             if (parsedText.isNotEmpty()) prefs.edit().putString("last", parsedText.take(2500)).apply()
@@ -163,48 +217,84 @@ class CardService : AccessibilityService() {
 
         if (shown != null) {
             handler.removeCallbacks(hideRunnable); hidePending = false
+            onOffer(shown)
             showCard(shown)
-        } else if (card != null && !hidePending) {
+        } else if (cardUi != null && !hidePending) {
             hidePending = true
             handler.postDelayed(hideRunnable, 2500)
         }
     }
 
-    private fun runOcr(debug: Boolean) {
-        if (Build.VERSION.SDK_INT < 30) { ocrState = "android<11"; return }
-        if (ocrBusy) return
+    /** Conta a oferta no resumo do dia e vibra se for verde. Cada oferta e contada uma vez so. */
+    private fun onOffer(o: Offer) {
+        val key = String.format(Locale.US, "%s|%.2f|%.1f", o.app, o.price, o.totalKm)
         val now = SystemClock.uptimeMillis()
-        if (now - lastOcrAt < 1500) return
-        lastOcrAt = now
-        ocrBusy = true
+        if (key == lastKey && now - lastKeyAt < 45000) { lastKeyAt = now; return }
+        if (key == candKey) candCount++ else { candKey = key; candCount = 1 }
+        if (candCount < 2) return
+        lastKey = key; lastKeyAt = now; candKey = ""; candCount = 0
+        val s = CardPrefs.load(this)
+        Stats.record(this, o, s)
+        if (s.vibrate && CardPrefs.level(o.perKm, s) == 2) Haptics.pulse(this)
+    }
+
+    /** Pede ao Android uma foto da tela. Sem popup nem som. */
+    private fun takeShot(cb: (Bitmap?) -> Unit) {
+        if (Build.VERSION.SDK_INT < 30) { cb(null); return }
         try {
             takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
+                    var out: Bitmap? = null
                     try {
                         val hw = result.hardwareBuffer
                         val hwBmp = Bitmap.wrapHardwareBuffer(hw, result.colorSpace)
-                        val sw = hwBmp?.copy(Bitmap.Config.ARGB_8888, false)
+                        out = hwBmp?.copy(Bitmap.Config.ARGB_8888, false)
                         hw.close()
-                        if (sw == null) { ocrBusy = false; ocrState = "bmp-null"; return }
-                        val top = (sw.height * 0.40).toInt()
-                        val crop = Bitmap.createBitmap(sw, 0, top, sw.width, sw.height - top)
-                        recognizer.process(InputImage.fromBitmap(crop, 0))
-                            .addOnSuccessListener { vt ->
-                                ocrBusy = false
-                                onOcrText(vt.text, debug)
-                            }
-                            .addOnFailureListener { ocrBusy = false; ocrState = "falhou" }
-                    } catch (e: Exception) {
-                        ocrBusy = false; ocrState = "erro-" + e.javaClass.simpleName
-                    }
+                    } catch (_: Exception) { }
+                    cb(out)
                 }
 
                 override fun onFailure(errorCode: Int) {
-                    ocrBusy = false; ocrState = "shot-erro$errorCode"
+                    shotErr = errorCode
+                    cb(null)
                 }
             })
         } catch (e: Exception) {
-            ocrBusy = false; ocrState = "erro-" + e.javaClass.simpleName
+            cb(null)
+        }
+    }
+
+    /** Guarda a ultima foto da tela (para o print do "Aceitar") e, se preciso, le a oferta da 99 por OCR. */
+    private fun capture(doOcr: Boolean, debug: Boolean, key: String?) {
+        if (Build.VERSION.SDK_INT < 30) { if (doOcr) ocrState = "android<11"; return }
+        if (shotBusy) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastShotAt < 1500) return
+        lastShotAt = now
+        shotBusy = true
+        takeShot { bmp ->
+            if (bmp == null) {
+                shotBusy = false
+                if (doOcr) ocrState = "shot-erro$shotErr"
+                return@takeShot
+            }
+            lastShot = bmp
+            lastShotKey = key
+            if (!doOcr) { shotBusy = false; return@takeShot }
+            try {
+                val top = (bmp.height * 0.40).toInt()
+                val crop = Bitmap.createBitmap(bmp, 0, top, bmp.width, bmp.height - top)
+                recognizer.process(InputImage.fromBitmap(crop, 0))
+                    .addOnSuccessListener { vt ->
+                        shotBusy = false
+                        onOcrText(vt.text, debug)
+                        ocrOffer?.let { lastShotKey = offerKey(it) }
+                    }
+                    .addOnFailureListener { shotBusy = false; ocrState = "falhou" }
+            } catch (e: Exception) {
+                shotBusy = false
+                ocrState = "erro-" + e.javaClass.simpleName
+            }
         }
     }
 
@@ -215,6 +305,112 @@ class CardService : AccessibilityService() {
         ocrOffer = Parser.parse(text, ocr = true)
         ocrAt = SystemClock.uptimeMillis()
         ocrState = if (ocrOffer != null) "ok" else "sem-oferta"
+    }
+
+    private fun offerKey(o: Offer) = String.format(Locale.US, "%s|%.2f|%.1f", o.app, o.price, o.totalKm)
+
+    /** Toque na tela dos apps de corrida: se foi em "Aceitar"/"Selecionar", guarda o print da oferta. */
+    private fun handleClick(e: AccessibilityEvent) {
+        val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        if (!prefs.getBoolean("enabled", true) || !prefs.getBoolean("saveAccepted", true)) return
+        val pkg = e.packageName?.toString() ?: return
+        val label = when {
+            pkg.contains("ubercab") -> "Uber"
+            pkg.contains("app99") -> "99"
+            pkg.contains("easymob") -> "Easymob"
+            else -> return
+        }
+        val now = SystemClock.uptimeMillis()
+        val sb = StringBuilder()
+        e.text?.forEach { sb.append(it).append(' ') }
+        e.contentDescription?.let { sb.append(it).append(' ') }
+        val r = Rect()
+        val src = e.source
+        if (src != null) {
+            src.getBoundsInScreen(r)
+            collect(src, sb)
+        }
+        val low = sb.toString().lowercase(Locale.ROOT)
+        val reject = low.contains("recusar") || low.contains("rejeitar") ||
+                low.contains("ignorar") || low.contains("cancelar")
+        var accept = !reject && (low.contains("aceitar") || low.contains("selecionar"))
+        val recent = lastShown?.takeIf { now - lastShownAt < 4000 }
+        var heur = false
+        // 99 nao expoe texto: toque grande na metade de baixo enquanto a oferta esta na tela
+        if (!accept && label == "99" && recent != null && recent.app == "99" && src != null) {
+            val dm = resources.displayMetrics
+            if (r.top >= dm.heightPixels * 0.40 && r.height() >= dm.heightPixels * 0.10 &&
+                r.width() >= dm.widthPixels * 0.5) {
+                accept = true; heur = true
+            }
+        }
+        if (prefs.getBoolean("debug", true)) {
+            val cls = e.className?.toString()?.substringAfterLast('.') ?: "?"
+            val txt = sb.toString().replace('\n', ' ').take(50)
+            val res = if (accept) (if (heur) "ACEITE (heuristica)" else "ACEITE") else "-"
+            clickLog.add(0, "$label | $cls | $txt | ${r.width()}x${r.height()} top=${r.top} | $res")
+            while (clickLog.size > 8) clickLog.removeAt(clickLog.size - 1)
+            prefs.edit().putString("clicks", clickLog.joinToString("\n")).apply()
+        }
+        if (accept) onAccepted(recent, label)
+    }
+
+    private fun onAccepted(o: Offer?, label: String) {
+        val now = SystemClock.uptimeMillis()
+        val key = if (o != null) offerKey(o) else "?$label"
+        if (key == lastAcceptKey && now - lastAcceptAt < 10000) return
+        lastAcceptKey = key
+        lastAcceptAt = now
+        if (o != null) Stats.recordAccepted(this, o)
+        val shot = lastShot
+        if (o != null && shot != null && lastShotKey == key && now - lastShotAt < 8000) {
+            // print tirado ANTES do toque: mostra a oferta ainda na tela
+            saveShot(shot, o, label)
+        } else {
+            takeShot { b ->
+                if (b != null) saveShot(b, o, label)
+                else handler.postDelayed({ takeShot { b2 -> if (b2 != null) saveShot(b2, o, label) } }, 450)
+            }
+        }
+    }
+
+    /** Salva na galeria: Pictures/RotaCard (nao precisa de permissao). */
+    private fun saveShot(bmp: Bitmap, o: Offer?, label: String) {
+        Thread {
+            try {
+                val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+                val info = if (o != null) String.format(Locale.US, "_R%.2f_%.2fkm", o.price, o.perKm) else ""
+                val name = "Corrida_${ts}_$label$info.jpg"
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/RotaCard")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    handler.post { Toast.makeText(this, "Não consegui criar o arquivo do print", Toast.LENGTH_LONG).show() }
+                    return@Thread
+                }
+                contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                handler.post { Toast.makeText(this, "Corrida salva na galeria (RotaCard)", Toast.LENGTH_SHORT).show() }
+            } catch (e: Exception) {
+                handler.post {
+                    Toast.makeText(this, "Falha ao salvar o print: " + e.javaClass.simpleName, Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    /** Chamado pelo app: tira e salva um print agora, so para conferir que o salvamento funciona. */
+    fun saveTest() {
+        takeShot { b ->
+            if (b != null) saveShot(b, null, "Teste")
+            else Toast.makeText(this, "Não consegui capturar a tela (erro $shotErr)", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun collect(n: AccessibilityNodeInfo, sb: StringBuilder): Int {
@@ -230,7 +426,7 @@ class CardService : AccessibilityService() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun overlayParams(yDp: Int) = WindowManager.LayoutParams(
+    private fun overlayParams(yDp: Int, bottom: Boolean = false) = WindowManager.LayoutParams(
         (resources.displayMetrics.widthPixels * 0.92).toInt(),
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -238,7 +434,10 @@ class CardService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
         PixelFormat.TRANSLUCENT
-    ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(yDp) }
+    ).apply {
+        gravity = (if (bottom) Gravity.BOTTOM else Gravity.TOP) or Gravity.CENTER_HORIZONTAL
+        y = dp(yDp)
+    }
 
     private fun showDbg(msg: String) {
         if (dbg == null) {
@@ -259,73 +458,27 @@ class CardService : AccessibilityService() {
     }
 
     private fun showCard(o: Offer) {
-        val p = getSharedPreferences("cfg", MODE_PRIVATE)
-        val green = p.getFloat("green", 2.0f)
-        val yellow = p.getFloat("yellow", 1.5f)
-        val minRating = p.getFloat("minRating", 4.8f)
-
-        val color = when {
-            o.perKm >= green -> Color.parseColor("#1B8E3E")
-            o.perKm >= yellow -> Color.parseColor("#E0A100")
-            else -> Color.parseColor("#C62828")
+        val s = CardPrefs.load(this)
+        if (cardUi != null && cardAtBottom != s.atBottom) removeCard()
+        var ui = cardUi
+        if (ui == null) {
+            ui = CardUi(this)
+            ui.bind(o, s)
+            try { wm.addView(ui.root, overlayParams(if (s.atBottom) 48 else 36, s.atBottom)) }
+            catch (_: Exception) { return }
+            cardUi = ui
+            cardAtBottom = s.atBottom
+            ui.root.alpha = 0f
+            ui.root.translationY = (if (s.atBottom) dp(14) else -dp(14)).toFloat()
+            ui.root.animate().alpha(s.opacity).translationY(0f).setDuration(180).start()
+        } else {
+            ui.bind(o, s)
+            ui.root.alpha = s.opacity
         }
-        val ratingTxt = o.rating?.let {
-            String.format(Locale.US, "★ %.2f", it) + if (it < minRating) " ⚠" else ""
-        } ?: "★ --"
-
-        val til = if (o.minEstimated) "~" else ""
-        val bigTxt = SpannableStringBuilder(
-            String.format(Locale.US, "R$ %.2f/km", o.perKm).replace('.', ',')
-        )
-        o.perHour?.let { h ->
-            val start = bigTxt.length
-            bigTxt.append("  •  " + til + String.format(Locale.US, "R$ %.0f/h", h))
-            bigTxt.setSpan(RelativeSizeSpan(0.78f), start, bigTxt.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-        val smallTxt = String.format(
-            Locale.US, "%s  •  %.1f km  •  %s%.0f min  •  R$ %.2f  •  %s",
-            ratingTxt, o.totalKm, til, o.totalMin, o.price, o.app
-        ).replace('.', ',')
-
-        if (card == null) {
-            val b = TextView(this).apply {
-                setTextColor(Color.WHITE); textSize = 26f
-                setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
-                maxLines = 1
-                setAutoSizeTextTypeUniformWithConfiguration(16, 26, 1, TypedValue.COMPLEX_UNIT_SP)
-            }
-            val s = TextView(this).apply {
-                setTextColor(Color.WHITE); textSize = 14f; gravity = Gravity.CENTER
-                maxLines = 1
-                setAutoSizeTextTypeUniformWithConfiguration(10, 14, 1, TypedValue.COMPLEX_UNIT_SP)
-            }
-            val c = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(10), dp(16), dp(10))
-                addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                addView(s, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            }
-            try { wm.addView(c, overlayParams(36)) } catch (_: Exception) { return }
-            card = c; big = b; small = s
-            c.alpha = 0f
-            c.translationY = -dp(14).toFloat()
-            c.animate().alpha(1f).translationY(0f).setDuration(180).start()
-        }
-        val dark = Color.rgb(
-            (Color.red(color) * 0.68f).toInt(),
-            (Color.green(color) * 0.68f).toInt(),
-            (Color.blue(color) * 0.68f).toInt()
-        )
-        card?.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(color, dark)).apply {
-            cornerRadius = dp(22).toFloat()
-            setStroke(dp(1), Color.argb(80, 255, 255, 255))
-        }
-        big?.text = bigTxt
-        small?.text = smallTxt
     }
 
     private fun removeCard() {
-        card?.let { try { wm.removeView(it) } catch (_: Exception) { } }
-        card = null; big = null; small = null
+        cardUi?.let { try { wm.removeView(it.root) } catch (_: Exception) { } }
+        cardUi = null
     }
 }
