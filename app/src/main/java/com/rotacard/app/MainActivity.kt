@@ -712,6 +712,8 @@ class MainActivity : Activity() {
             addView(viewBtn("Último texto que falhou", "fail"), lp(top = 8))
             addView(viewBtn("Último texto do OCR (99)", "ocr"), lp(top = 8))
             addView(viewBtn("Últimos toques (Uber, 99, Easymob)", "clicks"), lp(top = 8))
+            addView(viewBtn("Último OCR que falhou", "ocrfail"), lp(top = 8))
+            addView(viewBtn("Último erro interno", "lasterr"), lp(top = 8))
             addView(out, lp(top = 12))
         }
         val arrow = tv("▾", 18f, MUTED)

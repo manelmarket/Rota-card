@@ -74,14 +74,14 @@ class CardService : AccessibilityService() {
     private var ocrState = "-"
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
-    private val scanRunnable = Runnable { scanPending = false; scan() }
+    private val scanRunnable = Runnable { scanPending = false; safeScan() }
     private val hideRunnable = Runnable { hidePending = false; removeCard() }
     private val endTest = Runnable {
         if (SystemClock.uptimeMillis() >= testUntil - 50) removeCard()
     }
     private val loopRunnable = object : Runnable {
         override fun run() {
-            scan()
+            safeScan()
             if (running) handler.postDelayed(this, 800)
         }
     }
@@ -133,6 +133,20 @@ class CardService : AccessibilityService() {
         handler.postDelayed(endTest, 6000)
     }
 
+    /** Nunca deixa um erro interno derrubar o servico: guarda o erro para eu poder ver no Diagnostico. */
+    private fun safeScan() {
+        try {
+            scan()
+        } catch (t: Throwable) {
+            try {
+                val where = t.stackTrace.firstOrNull()?.toString() ?: ""
+                getSharedPreferences("cfg", MODE_PRIVATE).edit()
+                    .putString("lasterr", t.javaClass.simpleName + ": " + (t.message ?: "") + "\n" + where)
+                    .apply()
+            } catch (_: Throwable) { }
+        }
+    }
+
     private fun scan() {
         if (!::wm.isInitialized) return
         if (SystemClock.uptimeMillis() < testUntil) return
@@ -152,6 +166,7 @@ class CardService : AccessibilityService() {
         var parsedText = ""
         var failText = ""
         var big99 = false
+        var cardLike = false
         val pkgs = LinkedHashSet<String>()
         try {
             for (w in windows) {
@@ -161,13 +176,19 @@ class CardService : AccessibilityService() {
                 if (pk == packageName) continue
                 pkgs.add(pk)
                 val one = StringBuilder()
-                texts += collect(root, one)
+                val n = collect(root, one)
+                texts += n
                 val t = one.toString()
                 if (offer == null) {
                     val o = Parser.parse(t)
                     if (o != null) { offer = o; parsedText = t }
                     else if ((pk.contains("ubercab") || pk.contains("easymob")) &&
                         t.contains("R$") && t.contains("km")) failText = t
+                }
+                if ((pk.contains("ubercab") || pk.contains("easymob")) && n < 6) {
+                    w.getBoundsInScreen(r)
+                    if (r.top >= dm.heightPixels * 0.30 && r.height() >= dm.heightPixels * 0.25 &&
+                        r.height() <= dm.heightPixels * 0.65) cardLike = true
                 }
                 if (pk == "com.app99.driver") {
                     w.getBoundsInScreen(r)
@@ -192,7 +213,7 @@ class CardService : AccessibilityService() {
         }
 
         // 99: o app nao expoe o texto da oferta, entao le por imagem (OCR)
-        val needOcr = offer == null && big99 && prefs.getBoolean("ocr99", true)
+        val needOcr = offer == null && (big99 || cardLike) && prefs.getBoolean("ocr99", true)
         val shown = offer ?: (if (SystemClock.uptimeMillis() - ocrAt < 3000) ocrOffer else null)
         val saveOn = prefs.getBoolean("saveAccepted", true)
         if (needOcr || (saveOn && shown != null)) capture(needOcr, debug, shown?.let { offerKey(it) })
@@ -208,7 +229,7 @@ class CardService : AccessibilityService() {
             if (offer == null && failText.isNotEmpty()) prefs.edit().putString("fail", failText.take(2500)).apply()
             val src = if (offer != null) "LEU OFERTA" else if (shown != null) "LEU OFERTA (OCR)" else "sem oferta"
             showDbg(
-                "janelas=$wins textos=$texts $src $err 99grande=$big99 ocr=$ocrState\n" +
+                "janelas=$wins textos=$texts $src $err 99grande=$big99 cartao=$cardLike ocr=$ocrState\n" +
                         pkgs.joinToString(" | ")
             )
         } else {
@@ -249,8 +270,9 @@ class CardService : AccessibilityService() {
                         val hw = result.hardwareBuffer
                         val hwBmp = Bitmap.wrapHardwareBuffer(hw, result.colorSpace)
                         out = hwBmp?.copy(Bitmap.Config.ARGB_8888, false)
+                        hwBmp?.recycle()
                         hw.close()
-                    } catch (_: Exception) { }
+                    } catch (_: Throwable) { }
                     cb(out)
                 }
 
@@ -269,7 +291,7 @@ class CardService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < 30) { if (doOcr) ocrState = "android<11"; return }
         if (shotBusy) return
         val now = SystemClock.uptimeMillis()
-        if (now - lastShotAt < 1500) return
+        if (now - lastShotAt < 1000) return
         lastShotAt = now
         shotBusy = true
         takeShot { bmp ->
@@ -282,7 +304,7 @@ class CardService : AccessibilityService() {
             lastShotKey = key
             if (!doOcr) { shotBusy = false; return@takeShot }
             try {
-                val top = (bmp.height * 0.40).toInt()
+                val top = (bmp.height * 0.30).toInt()
                 val crop = Bitmap.createBitmap(bmp, 0, top, bmp.width, bmp.height - top)
                 recognizer.process(InputImage.fromBitmap(crop, 0))
                     .addOnSuccessListener { vt ->
@@ -291,7 +313,7 @@ class CardService : AccessibilityService() {
                         ocrOffer?.let { lastShotKey = offerKey(it) }
                     }
                     .addOnFailureListener { shotBusy = false; ocrState = "falhou" }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 shotBusy = false
                 ocrState = "erro-" + e.javaClass.simpleName
             }
@@ -302,7 +324,11 @@ class CardService : AccessibilityService() {
         if (debug && text.contains("R$")) {
             getSharedPreferences("cfg", MODE_PRIVATE).edit().putString("ocr", text.take(2500)).apply()
         }
-        ocrOffer = Parser.parse(text, ocr = true)
+        val parsed = Parser.parse(text, ocr = true)
+        ocrOffer = parsed
+        if (parsed == null && debug && (text.contains("km") || text.contains("min"))) {
+            getSharedPreferences("cfg", MODE_PRIVATE).edit().putString("ocrfail", text.take(2500)).apply()
+        }
         ocrAt = SystemClock.uptimeMillis()
         ocrState = if (ocrOffer != null) "ok" else "sem-oferta"
     }

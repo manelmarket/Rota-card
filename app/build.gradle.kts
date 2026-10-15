@@ -11,7 +11,7 @@ android {
         targetSdk = 34
         val verCode = (project.findProperty("verCode") as String?)?.toIntOrNull() ?: 4
         versionCode = verCode
-        versionName = "2.0 (build $verCode)"
+        versionName = "2.1 (build $verCode)"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
