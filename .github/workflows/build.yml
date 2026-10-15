@@ -19,7 +19,18 @@ jobs:
           gradle-version: 8.9
       - name: Definir versao
         run: echo "VERCODE=$((100 + GITHUB_RUN_NUMBER))" >> $GITHUB_ENV
-      - run: gradle assembleDebug --no-daemon -PverCode=$VERCODE
+      - name: Compilar
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon -PverCode=$VERCODE 2>&1 | tee build.log
+      - name: Mostrar erros de compilacao
+        if: failure()
+        run: |
+          echo "### Erros de compilacao" >> $GITHUB_STEP_SUMMARY
+          grep -E "^e: " build.log | sed -E 's#file:///home/runner/work/[^/]+/[^/]+/##' | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+            echo "- \`$line\`" >> $GITHUB_STEP_SUMMARY
+          done
       - name: Renomear APK
         run: cp app/build/outputs/apk/debug/app-debug.apk RotaCard.apk
       - uses: actions/upload-artifact@v4

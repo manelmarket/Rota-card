@@ -20,7 +20,7 @@ object Parser {
     // Preco "R$ 15,01" ou "R$14,60" (ignora "R$2,22/km")
     private val PRICE = Regex("""R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})(?!\d)(?!\s*/\s*km)""")
     // Preco lido por OCR: o "R" pode estar escondido (ex.: bolha da Uber por cima) ou o "$" lido como "S"
-    private val PRICE_OCR = Regex("""(?:R\s*)?[$S]\s*(\d{1,3}(?:\.\d{3})*,\d{2})(?!\d)(?!\s*/\s*km)""")
+    private val PRICE_OCR = Regex("""(?:R\s*)?[\x24S]\s*(\d{1,3}(?:\.\d{3})*,\d{2})(?!\d)(?!\s*/\s*km)""")
     // Uber e 99: "4 min (1.1 km)", "11 minutos (4.5 km)", "1 minuto (0.2 km)", "4 min (487 m)"
     private val LEG = Regex("""(\d+)\s*min(?:utos?)?\s*[(\[{]\s*(\d+(?:[.,]\d+)?)\s*(km|m)\s*[)\]}]""")
     // Easymob: "Embarque - (3,55 km)" e "Destino - (1,84 km)4 min" (so o destino traz o tempo)

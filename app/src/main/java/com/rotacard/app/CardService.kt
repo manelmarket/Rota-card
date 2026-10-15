@@ -139,9 +139,9 @@ class CardService : AccessibilityService() {
             scan()
         } catch (t: Throwable) {
             try {
-                val where = t.stackTrace.firstOrNull()?.toString() ?: ""
+                val loc = t.stackTrace.firstOrNull()?.toString() ?: ""
                 getSharedPreferences("cfg", MODE_PRIVATE).edit()
-                    .putString("lasterr", t.javaClass.simpleName + ": " + (t.message ?: "") + "\n" + where)
+                    .putString("lasterr", t.javaClass.simpleName + ": " + (t.message ?: "") + "\n" + loc)
                     .apply()
             } catch (_: Throwable) { }
         }
