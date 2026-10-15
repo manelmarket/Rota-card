@@ -376,7 +376,7 @@ class HistoryActivity : Activity() {
         } else "print salvo, sem dados"
         val line3 = if (r.hasData) {
             Fmt.d1(r.totalKm) + " km  •  " + til + Fmt.n0(r.totalMin) + " min" +
-                    (r.rating?.let { "  •  ★ " + Fmt.d2(it) } ?: "") + "  •  " + r.app
+                    (r.rating?.let { "  •  ★ " + Fmt.d2(it) } ?: "") + "  •  " + r.app + (if (r.guess) "  •  provável" else "")
         } else r.app
 
         val texts = LinearLayout(this).apply {
@@ -557,6 +557,12 @@ class HistoryActivity : Activity() {
         panelBody.addView(detailRow("App", r.app))
         panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         panelBody.addView(detailRow("Aceita em", SimpleDateFormat("dd/MM/yyyy  HH:mm:ss", pt).format(Date(r.id))))
+        if (r.guess) {
+            panelBody.addView(
+                tv("Aceite provável: o app deduziu porque a oferta do Easymob sumiu antes do fim da contagem.", 11f, MUTED),
+                lp(top = 8)
+            )
+        }
         if (r.minEstimated) {
             panelBody.addView(
                 tv("~ Tempo estimado: o Easymob não informa o tempo até o passageiro (calculado a 30 km/h).", 11f, MUTED),

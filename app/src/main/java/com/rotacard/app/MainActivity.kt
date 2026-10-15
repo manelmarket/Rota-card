@@ -676,6 +676,13 @@ class MainActivity : Activity() {
                 prefs.edit().putBoolean("saveAccepted", it).apply()
             }, lp())
             addView(tv("Fica na galeria, no álbum RotaCard (pasta Pictures/RotaCard).", 12f, MUTED), lp(bottom = 8))
+            addView(switchRow("Easymob: reconhecer arrasto para a direita", prefs.getBoolean("easySwipe", true)) {
+                prefs.edit().putBoolean("easySwipe", it).apply()
+            }, lp())
+            addView(switchRow("Easymob: aceite provável se a oferta some antes do fim", prefs.getBoolean("easyGuess", false)) {
+                prefs.edit().putBoolean("easyGuess", it).apply()
+            }, lp())
+            addView(tv("O arrasto é detectado pelo movimento do botão na tela. O aceite provável é uma reserva e pode errar se você recusar arrastando para a esquerda.", 12f, MUTED), lp(bottom = 8))
             addView(button("Testar salvar print", false) {
                 val svc = CardService.instance
                 if (svc != null) svc.saveTest()
@@ -714,6 +721,7 @@ class MainActivity : Activity() {
             addView(viewBtn("Últimos toques (Uber, 99, Easymob)", "clicks"), lp(top = 8))
             addView(viewBtn("Último OCR que falhou", "ocrfail"), lp(top = 8))
             addView(viewBtn("Último erro interno", "lasterr"), lp(top = 8))
+            addView(viewBtn("Registro do Easymob (arrasto)", "easylog"), lp(top = 8))
             addView(out, lp(top = 12))
         }
         val arrow = tv("▾", 18f, MUTED)

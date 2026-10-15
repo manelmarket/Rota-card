@@ -68,6 +68,25 @@ class CardService : AccessibilityService() {
     private var lastAcceptAt = 0L
     private val clickLog = mutableListOf<String>()
 
+    // Easymob: arrasto para aceitar
+    private var easyKey = ""
+    private var easyCount: Int? = null
+    private var easySeenAt = 0L
+    private var easyActiveUntil = 0L
+    private var easyBase: IntArray? = null
+    private var swipeDone = false
+    private var easyGoneDone = false
+    private var lastRefuseAt = 0L
+    private var fastRunning = false
+    private val easyLog = mutableListOf<String>()
+    private val fastRunnable = object : Runnable {
+        override fun run() {
+            try { fastTick() } catch (_: Throwable) { }
+            if (running && SystemClock.uptimeMillis() < easyActiveUntil) handler.postDelayed(this, 150)
+            else fastRunning = false
+        }
+    }
+
     // OCR (99)
     private var ocrOffer: Offer? = null
     private var ocrAt = 0L
@@ -181,7 +200,10 @@ class CardService : AccessibilityService() {
                 val t = one.toString()
                 if (offer == null) {
                     val o = Parser.parse(t)
-                    if (o != null) { offer = o; parsedText = t }
+                    if (o != null) {
+                        offer = o; parsedText = t
+                        if (pk.contains("easymob") && o.app == "Easymob") onEasyOffer(o, t, prefs)
+                    }
                     else if ((pk.contains("ubercab") || pk.contains("easymob")) &&
                         t.contains("R$") && t.contains("km")) failText = t
                 }
@@ -217,6 +239,16 @@ class CardService : AccessibilityService() {
         val shown = offer ?: (if (SystemClock.uptimeMillis() - ocrAt < 3000) ocrOffer else null)
         val saveOn = prefs.getBoolean("saveAccepted", true)
         if (needOcr || (saveOn && shown != null)) capture(needOcr, debug, shown?.let { offerKey(it) })
+        val nowMs = SystemClock.uptimeMillis()
+        if (shown == null && !easyGoneDone && prefs.getBoolean("easyGuess", false) &&
+            lastShown?.app == "Easymob" && nowMs - lastShownAt in 2000..3500) {
+            easyGoneDone = true
+            val c = easyCount
+            if (c != null && c >= 3 && nowMs - lastRefuseAt > 5000 && nowMs - easySeenAt < 4000) {
+                easyLogAdd("ACEITE PROVAVEL: oferta sumiu com contagem em $c")
+                onAccepted(lastShown, "Easymob", true)
+            }
+        }
         if (shown != null) {
             lastShown = shown
             lastShownAt = SystemClock.uptimeMillis()
@@ -359,6 +391,7 @@ class CardService : AccessibilityService() {
         val low = sb.toString().lowercase(Locale.ROOT)
         val reject = low.contains("recusar") || low.contains("rejeitar") ||
                 low.contains("ignorar") || low.contains("cancelar")
+        if (reject && label == "Easymob") lastRefuseAt = now
         var accept = !reject && (low.contains("aceitar") || low.contains("selecionar"))
         val recent = lastShown?.takeIf { now - lastShownAt < 4000 }
         var heur = false
@@ -381,7 +414,7 @@ class CardService : AccessibilityService() {
         if (accept) onAccepted(recent, label)
     }
 
-    private fun onAccepted(o: Offer?, label: String) {
+    private fun onAccepted(o: Offer?, label: String, guess: Boolean = false) {
         val now = SystemClock.uptimeMillis()
         val key = if (o != null) offerKey(o) else "?$label"
         if (key == lastAcceptKey && now - lastAcceptAt < 10000) return
@@ -391,17 +424,17 @@ class CardService : AccessibilityService() {
         val shot = lastShot
         if (o != null && shot != null && lastShotKey == key && now - lastShotAt < 8000) {
             // print tirado ANTES do toque: mostra a oferta ainda na tela
-            saveShot(shot, o, label)
+            saveShot(shot, o, label, guess)
         } else {
             takeShot { b ->
-                if (b != null) saveShot(b, o, label)
-                else handler.postDelayed({ takeShot { b2 -> saveShot(b2, o, label) } }, 450)
+                if (b != null) saveShot(b, o, label, guess)
+                else handler.postDelayed({ takeShot { b2 -> saveShot(b2, o, label, guess) } }, 450)
             }
         }
     }
 
     /** Salva o print na galeria (Pictures/RotaCard), guarda uma copia menor no app e registra no historico. */
-    private fun saveShot(bmp: Bitmap?, o: Offer?, label: String) {
+    private fun saveShot(bmp: Bitmap?, o: Offer?, label: String, guess: Boolean = false) {
         val id = System.currentTimeMillis()
         Thread {
             var gallery: String? = null
@@ -439,7 +472,7 @@ class CardService : AccessibilityService() {
                     thumb = "$id.jpg"
                 } catch (_: Exception) { }
             }
-            if (label != "Teste") History.add(this, Ride.from(o, id, label, thumb, gallery))
+            if (label != "Teste") History.add(this, Ride.from(o, id, label, thumb, gallery, guess))
             val msg = when {
                 bmp == null -> "Aceite detectado, mas não consegui tirar o print"
                 gallery == null && thumb == null -> "Falha ao salvar o print" + (err?.let { ": $it" } ?: "")
@@ -454,6 +487,99 @@ class CardService : AccessibilityService() {
         takeShot { b ->
             if (b != null) saveShot(b, null, "Teste")
             else Toast.makeText(this, "Não consegui capturar a tela (erro $shotErr)", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun easyLogAdd(line: String) {
+        val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        if (!prefs.getBoolean("debug", true)) return
+        easyLog.add(0, SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()) + " " + line)
+        while (easyLog.size > 12) easyLog.removeAt(easyLog.size - 1)
+        prefs.edit().putString("easylog", easyLog.joinToString("\n")).apply()
+    }
+
+    /** Chamado quando uma oferta do Easymob e lida: guarda a contagem e liga a leitura rapida do arrasto. */
+    private fun onEasyOffer(o: Offer, t: String, prefs: android.content.SharedPreferences) {
+        val now = SystemClock.uptimeMillis()
+        val k = offerKey(o)
+        if (k != easyKey) {
+            easyKey = k
+            easyBase = null
+            swipeDone = false
+            easyGoneDone = false
+        }
+        easyCount = Parser.countdown(t)
+        easySeenAt = now
+        easyActiveUntil = now + 3000
+        if (!fastRunning && prefs.getBoolean("easySwipe", true)) {
+            fastRunning = true
+            handler.post(fastRunnable)
+        }
+    }
+
+    /**
+     * Enquanto a oferta do Easymob esta na tela, olha varias vezes por segundo onde ficam os elementos
+     * da parte de baixo. Se algum se desloca bastante para a direita, e o arrasto de aceitar.
+     */
+    private fun fastTick() {
+        val dm = resources.displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+        var root: AccessibilityNodeInfo? = null
+        for (win in windows) {
+            val r = win.root ?: continue
+            if (r.packageName?.toString()?.contains("easymob") == true) { root = r; break }
+        }
+        if (root == null) return
+        val xs = ArrayList<Int>()
+        val descr = ArrayList<String>()
+        val rect = Rect()
+        fun walk(n: AccessibilityNodeInfo) {
+            n.getBoundsInScreen(rect)
+            if (rect.centerY() >= h * 0.55 && rect.width() > 0 && rect.width() <= w * 0.45 && rect.height() > 0) {
+                xs.add(rect.centerX())
+                val cls = n.className?.toString()?.substringAfterLast('.') ?: "?"
+                val tx = (n.text ?: n.contentDescription)?.toString()?.take(12) ?: ""
+                descr.add("$cls[$tx]x=${rect.centerX()}")
+            } else {
+                xs.add(Int.MIN_VALUE)
+                descr.add("")
+            }
+            for (i in 0 until n.childCount) {
+                val c = n.getChild(i) ?: continue
+                walk(c)
+            }
+        }
+        walk(root)
+
+        val base = easyBase
+        if (base == null || base.size != xs.size) {
+            easyBase = xs.toIntArray()
+            easyLogAdd("ESTRUTURA: " + descr.filter { it.isNotEmpty() }.joinToString(" ").take(300))
+            return
+        }
+        var maxDx = 0
+        var minDx = 0
+        var iMax = -1
+        for (i in xs.indices) {
+            if (xs[i] == Int.MIN_VALUE || base[i] == Int.MIN_VALUE) continue
+            val dx = xs[i] - base[i]
+            if (dx > maxDx) { maxDx = dx; iMax = i }
+            if (dx < minDx) minDx = dx
+        }
+        val limit = (w * 0.18f).toInt()
+        val now = SystemClock.uptimeMillis()
+        if (!swipeDone && maxDx >= limit && minDx > -(w * 0.10f).toInt()) {
+            swipeDone = true
+            easyLogAdd("ARRASTO PARA A DIREITA: dx=$maxDx em " + (if (iMax >= 0) descr[iMax] else "?"))
+            val off = lastShown?.takeIf { it.app == "Easymob" && now - lastShownAt < 5000 }
+            onAccepted(off, "Easymob")
+        } else if (minDx <= -limit && maxDx < (w * 0.10f).toInt()) {
+            if (now - lastRefuseAt > 3000) easyLogAdd("ARRASTO PARA A ESQUERDA (recusa): dx=$minDx")
+            lastRefuseAt = now
+        } else if (maxDx >= (w * 0.06f).toInt() && now - lastRefuseAt > 1500) {
+            easyLogAdd("movimento para a direita: dx=$maxDx")
+            lastRefuseAt = now - 3500
         }
     }
 

@@ -31,6 +31,12 @@ object Parser {
     // Easymob nao informa o tempo ate o passageiro: estima pela distancia a esta velocidade media
     private const val PICKUP_KMH = 30.0
 
+    private val COUNT = Regex("""(?m)^\s*(\d{1,2})\s*$""")
+
+    /** Numero da contagem regressiva do Easymob (a oferta some quando chega a 0). */
+    fun countdown(text: String): Int? =
+        COUNT.findAll(text).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
+
     private fun labelFor(text: String, ocr: Boolean): String {
         val is99 = text.contains("corridas") || text.contains("Pgto") ||
                 text.contains("Dinheiro") || text.contains("CPF verif")

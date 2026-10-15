@@ -19,7 +19,8 @@ data class Ride(
     val tripMin: Double,
     val minEstimated: Boolean,
     val shot: String?,
-    val gallery: String?
+    val gallery: String?,
+    val guess: Boolean = false
 ) {
     val totalKm get() = pickupKm + tripKm
     val totalMin get() = pickupMin + tripMin
@@ -27,11 +28,11 @@ data class Ride(
     val perHour: Double? get() = if (hasData && totalMin > 0.0) price / totalMin * 60.0 else null
 
     companion object {
-        fun from(o: Offer?, id: Long, label: String, shot: String?, gallery: String?): Ride =
+        fun from(o: Offer?, id: Long, label: String, shot: String?, gallery: String?, guess: Boolean = false): Ride =
             if (o != null)
-                Ride(id, label, true, o.price, o.rating, o.pickupKm, o.tripKm, o.pickupMin, o.tripMin, o.minEstimated, shot, gallery)
+                Ride(id, label, true, o.price, o.rating, o.pickupKm, o.tripKm, o.pickupMin, o.tripMin, o.minEstimated, shot, gallery, guess)
             else
-                Ride(id, label, false, 0.0, null, 0.0, 0.0, 0.0, 0.0, false, shot, gallery)
+                Ride(id, label, false, 0.0, null, 0.0, 0.0, 0.0, 0.0, false, shot, gallery, guess)
     }
 }
 
@@ -48,6 +49,7 @@ object History {
         put("pk", r.pickupKm); put("tk", r.tripKm)
         put("pm", r.pickupMin); put("tm", r.tripMin); put("est", r.minEstimated)
         put("shot", r.shot ?: JSONObject.NULL); put("gallery", r.gallery ?: JSONObject.NULL)
+        put("guess", r.guess)
     }
 
     private fun fromJson(o: JSONObject) = Ride(
@@ -57,7 +59,8 @@ object History {
         o.optDouble("pk", 0.0), o.optDouble("tk", 0.0),
         o.optDouble("pm", 0.0), o.optDouble("tm", 0.0), o.optBoolean("est", false),
         if (o.isNull("shot")) null else o.optString("shot"),
-        if (o.isNull("gallery")) null else o.optString("gallery")
+        if (o.isNull("gallery")) null else o.optString("gallery"),
+        o.optBoolean("guess", false)
     )
 
     private fun readAll(ctx: Context): MutableList<Ride> {
