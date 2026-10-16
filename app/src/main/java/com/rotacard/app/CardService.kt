@@ -79,6 +79,9 @@ class CardService : AccessibilityService() {
     private var lastRefuseAt = 0L
     private var fastRunning = false
     private val easyLog = mutableListOf<String>()
+    private var curFirstAt = 0L
+    private var goneHandled = false
+    private var lastLeftLog = 0L
     private val fastRunnable = object : Runnable {
         override fun run() {
             try { fastTick() } catch (_: Throwable) { }
@@ -113,6 +116,7 @@ class CardService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (!License.canRun(this)) return
         if (event != null && event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             try { handleClick(event) } catch (_: Exception) { }
         }
@@ -168,6 +172,8 @@ class CardService : AccessibilityService() {
 
     private fun scan() {
         if (!::wm.isInitialized) return
+        if (!License.canRun(this)) { removeCard(); removeDbg(); return }
+        License.checkAsync(this, false) { }
         if (SystemClock.uptimeMillis() < testUntil) return
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         if (!prefs.getBoolean("enabled", true)) {
@@ -240,20 +246,36 @@ class CardService : AccessibilityService() {
         val saveOn = prefs.getBoolean("saveAccepted", true)
         if (needOcr || (saveOn && shown != null)) capture(needOcr, debug, shown?.let { offerKey(it) })
         val nowMs = SystemClock.uptimeMillis()
-        if (shown == null && !easyGoneDone && prefs.getBoolean("easyGuess", false) &&
-            lastShown?.app == "Easymob" && nowMs - lastShownAt in 2000..3500) {
-            easyGoneDone = true
-            val c = easyCount
-            if (c != null && c >= 3 && nowMs - lastRefuseAt > 5000 && nowMs - easySeenAt < 4000) {
-                easyLogAdd("ACEITE PROVAVEL: oferta sumiu com contagem em $c")
-                onAccepted(lastShown, "Easymob", true)
-            }
-        }
         if (shown != null) {
+            val prev = lastShown
+            // comeca uma "presenca" nova quando e outro app ou passou mais de 3 s sem ver a oferta
+            if (prev == null || prev.app != shown.app || nowMs - lastShownAt > 3000) {
+                curFirstAt = nowMs
+                goneHandled = false
+            }
             lastShown = shown
-            lastShownAt = SystemClock.uptimeMillis()
-        } else if (SystemClock.uptimeMillis() - lastShownAt > 10000) {
-            lastShot = null
+            lastShownAt = nowMs
+        } else {
+            val o = lastShown
+            val gap = nowMs - lastShownAt
+            if (o != null && !goneHandled && gap in 2000..8000) {
+                goneHandled = true
+                val duration = lastShownAt - curFirstAt
+                val refused = lastRefuseAt >= curFirstAt && nowMs - lastRefuseAt < 12000
+                val early = duration < 12000
+                val c = easyCount
+                val easyLate = o.app == "Easymob" && c != null && c < 3
+                val decision: String
+                if (prefs.getBoolean("guessAccept", true) && !refused && early && !easyLate) {
+                    decision = "ACEITE PROVAVEL"
+                    onAccepted(o, o.app, true)
+                } else {
+                    decision = "sem aceite (recusa=$refused, cedo=$early, fimDaContagem=$easyLate)"
+                }
+                easyLogAdd(o.app + ": oferta sumiu apos " + (duration / 1000) + " s -> " + decision)
+                dumpPost(o.app, decision)
+            }
+            if (gap > 10000) lastShot = null
         }
 
         if (debug) {
@@ -391,7 +413,7 @@ class CardService : AccessibilityService() {
         val low = sb.toString().lowercase(Locale.ROOT)
         val reject = low.contains("recusar") || low.contains("rejeitar") ||
                 low.contains("ignorar") || low.contains("cancelar")
-        if (reject && label == "Easymob") lastRefuseAt = now
+        if (reject) lastRefuseAt = now
         var accept = !reject && (low.contains("aceitar") || low.contains("selecionar"))
         val recent = lastShown?.takeIf { now - lastShownAt < 4000 }
         var heur = false
@@ -403,12 +425,21 @@ class CardService : AccessibilityService() {
                 accept = true; heur = true
             }
         }
+        // Uber e Easymob: botao largo na parte de baixo (o "Aceitar") mesmo sem texto
+        if (!accept && !reject && label != "99" && recent != null && src != null) {
+            val dm2 = resources.displayMetrics
+            if (r.width() >= dm2.widthPixels * 0.4 && r.top >= dm2.heightPixels * 0.6) {
+                accept = true; heur = true
+            }
+        }
+        // toque pequeno sem texto numa oferta da Uber (o "X") = recusa
+        if (!accept && !reject && label == "Uber" && recent != null) lastRefuseAt = now
         if (prefs.getBoolean("debug", true)) {
             val cls = e.className?.toString()?.substringAfterLast('.') ?: "?"
             val txt = sb.toString().replace('\n', ' ').take(50)
             val res = if (accept) (if (heur) "ACEITE (heuristica)" else "ACEITE") else "-"
             clickLog.add(0, "$label | $cls | $txt | ${r.width()}x${r.height()} top=${r.top} | $res")
-            while (clickLog.size > 8) clickLog.removeAt(clickLog.size - 1)
+            while (clickLog.size > 14) clickLog.removeAt(clickLog.size - 1)
             prefs.edit().putString("clicks", clickLog.joinToString("\n")).apply()
         }
         if (accept) onAccepted(recent, label)
@@ -422,7 +453,7 @@ class CardService : AccessibilityService() {
         lastAcceptAt = now
         if (o != null) Stats.recordAccepted(this, o)
         val shot = lastShot
-        if (o != null && shot != null && lastShotKey == key && now - lastShotAt < 8000) {
+        if (o != null && shot != null && (lastShotKey == key || guess) && now - lastShotAt < (if (guess) 12000 else 8000)) {
             // print tirado ANTES do toque: mostra a oferta ainda na tela
             saveShot(shot, o, label, guess)
         } else {
@@ -472,7 +503,14 @@ class CardService : AccessibilityService() {
                     thumb = "$id.jpg"
                 } catch (_: Exception) { }
             }
-            if (label != "Teste") History.add(this, Ride.from(o, id, label, thumb, gallery, guess))
+            if (label != "Teste") {
+                try {
+                    History.add(this, Ride.from(o, id, label, thumb, gallery, guess))
+                } catch (t: Throwable) {
+                    getSharedPreferences("cfg", MODE_PRIVATE).edit()
+                        .putString("lasterr", "historico: " + t.javaClass.simpleName + " " + (t.message ?: "")).apply()
+                }
+            }
             val msg = when {
                 bmp == null -> "Aceite detectado, mas não consegui tirar o print"
                 gallery == null && thumb == null -> "Falha ao salvar o print" + (err?.let { ": $it" } ?: "")
@@ -480,6 +518,33 @@ class CardService : AccessibilityService() {
             }
             handler.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
         }.start()
+    }
+
+    /** Guarda o que apareceu na tela do app ~2,5 s depois da oferta sumir (para eu aprender como cada app mostra o aceite). */
+    private fun dumpPost(app: String, decision: String) {
+        handler.postDelayed({
+            try {
+                val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+                if (!prefs.getBoolean("debug", true)) return@postDelayed
+                val key = when (app) { "Uber" -> "ubercab"; "99" -> "app99"; else -> "easymob" }
+                val sb = StringBuilder()
+                for (w in windows) {
+                    val r = w.root ?: continue
+                    if (r.packageName?.toString()?.contains(key) == true) collect(r, sb)
+                }
+                val line = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()) + " " + app + " [" + decision + "]\n" +
+                        sb.toString().replace('\n', ' ').take(600)
+                val old = prefs.getString("post", "") ?: ""
+                prefs.edit().putString("post", (line + "\n\n" + old).take(2600)).apply()
+            } catch (_: Throwable) { }
+        }, 2500)
+    }
+
+    /** Chamado pelo app: simula um aceite (print + historico) para conferir que tudo funciona. */
+    fun simulateAccept() {
+        val s = CardPrefs.load(this)
+        val o = CardPrefs.sample(0, s).copy(app = "Simulação")
+        takeShot { b -> saveShot(b, o, "Simulação") }
     }
 
     /** Chamado pelo app: tira e salva um print agora, so para conferir que o salvamento funciona. */
@@ -551,6 +616,7 @@ class CardService : AccessibilityService() {
             }
         }
         walk(root)
+        if (xs.size < 8) return
 
         val base = easyBase
         if (base == null || base.size != xs.size) {
@@ -575,11 +641,10 @@ class CardService : AccessibilityService() {
             val off = lastShown?.takeIf { it.app == "Easymob" && now - lastShownAt < 5000 }
             onAccepted(off, "Easymob")
         } else if (minDx <= -limit && maxDx < (w * 0.10f).toInt()) {
-            if (now - lastRefuseAt > 3000) easyLogAdd("ARRASTO PARA A ESQUERDA (recusa): dx=$minDx")
-            lastRefuseAt = now
-        } else if (maxDx >= (w * 0.06f).toInt() && now - lastRefuseAt > 1500) {
-            easyLogAdd("movimento para a direita: dx=$maxDx")
-            lastRefuseAt = now - 3500
+            if (now - lastLeftLog > 3000) {
+                lastLeftLog = now
+                easyLogAdd("movimento para a esquerda: dx=$minDx")
+            }
         }
     }
 

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Cole aqui a URL do painel (termina em /exec). Enquanto estiver como esta, o app funciona sem login. -->
+    <string name="license_url" translatable="false">COLE_AQUI_A_URL_DO_PAINEL</string>
+</resources>

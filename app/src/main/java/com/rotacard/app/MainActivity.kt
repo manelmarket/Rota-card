@@ -64,6 +64,7 @@ class MainActivity : Activity() {
     private lateinit var hintText: TextView
     private lateinit var a11yText: TextView
     private lateinit var a11yDot: View
+    private lateinit var licText: TextView
     private lateinit var greenF: EditText
     private lateinit var yellowF: EditText
     private lateinit var ratingF: EditText
@@ -243,6 +244,20 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun refreshLicense() {
+        if (!License.enabled(this)) { licText.visibility = View.GONE; return }
+        val d = License.daysLeft(this)
+        val date = java.text.SimpleDateFormat("dd/MM/yyyy", Locale.US)
+            .format(java.util.Date(License.expiresAt(this)))
+        licText.visibility = View.VISIBLE
+        licText.text = when {
+            d <= 0 -> "Acesso vencido"
+            d == 1 -> "Acesso: vence amanhã ($date)"
+            else -> "Acesso: $d dias restantes (até $date)"
+        }
+        licText.setTextColor(if (d <= 0) RED else if (d <= 3) AMBER else MUTED)
+    }
+
     private fun refreshPower() {
         val on = prefs.getBoolean("enabled", true)
         power.on = on
@@ -259,6 +274,20 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (License.enabled(this)) {
+            if (!License.canRun(this)) {
+                startActivity(Intent(this, LoginActivity::class.java))
+                finish()
+                return
+            }
+            License.checkAsync(this, false) { ok ->
+                if (!ok) runOnUiThread {
+                    startActivity(Intent(this, LoginActivity::class.java))
+                    finish()
+                }
+            }
+            if (::licText.isInitialized) refreshLicense()
+        }
         if (::a11yText.isInitialized) refreshA11y()
         handler.removeCallbacks(tick)
         handler.post(tick)
@@ -552,6 +581,11 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        if (!License.canRun(this)) {
+            startActivity(Intent(this, LoginActivity::class.java))
+            finish()
+            return
+        }
         window.statusBarColor = BG
         window.navigationBarColor = BG
 
@@ -570,8 +604,12 @@ class MainActivity : Activity() {
 
         // ---- cabecalho
         val title = TextView(this).apply {
-            val sb = SpannableStringBuilder("Rota Boa, Manel")
-            sb.setSpan(ForegroundColorSpan(CYAN), 10, 15, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val who = if (License.enabled(this@MainActivity)) License.displayName(this@MainActivity) else "Manel"
+            val full = if (who.isNotEmpty()) "Rota Boa, $who" else "Rota Boa"
+            val sb = SpannableStringBuilder(full)
+            if (who.isNotEmpty()) sb.setSpan(ForegroundColorSpan(CYAN), 10, full.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
             text = sb
             textSize = 28f
             setTextColor(TEXT)
@@ -633,6 +671,11 @@ class MainActivity : Activity() {
             pressable(this)
         }
         pulse(a11yDot)
+        licText = tv("", 12f, MUTED).apply {
+            background = bg(SURFACE, 18, STROKE)
+            setPadding(dp(14), dp(7), dp(14), dp(7))
+            visibility = View.GONE
+        }
         val hero = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -641,6 +684,8 @@ class MainActivity : Activity() {
             addView(hintText, lp(top = 2, bottom = 16))
             addView(a11yRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(licText, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         }
 
         // ---- faixas de R$/km
@@ -679,10 +724,15 @@ class MainActivity : Activity() {
             addView(switchRow("Easymob: reconhecer arrasto para a direita", prefs.getBoolean("easySwipe", true)) {
                 prefs.edit().putBoolean("easySwipe", it).apply()
             }, lp())
-            addView(switchRow("Easymob: aceite provável se a oferta some antes do fim", prefs.getBoolean("easyGuess", false)) {
-                prefs.edit().putBoolean("easyGuess", it).apply()
+            addView(switchRow("Aceite provável: oferta que some antes do fim", prefs.getBoolean("guessAccept", true)) {
+                prefs.edit().putBoolean("guessAccept", it).apply()
             }, lp())
-            addView(tv("O arrasto é detectado pelo movimento do botão na tela. O aceite provável é uma reserva e pode errar se você recusar arrastando para a esquerda.", 12f, MUTED), lp(bottom = 8))
+            addView(tv("Quando o toque ou o arrasto não são percebidos, o app considera aceita a oferta que some antes de acabar o tempo, sem recusa. Essas corridas aparecem no histórico com a marca \"provável\". Vale para Uber, 99 e Easymob.", 12f, MUTED), lp(bottom = 8))
+            addView(button("Simular aceite (testa histórico e galeria)", false) {
+                val svc = CardService.instance
+                if (svc != null) svc.simulateAccept()
+                else Toast.makeText(this@MainActivity, "Ative o serviço de acessibilidade primeiro", Toast.LENGTH_LONG).show()
+            }, lp(bottom = 8))
             addView(button("Testar salvar print", false) {
                 val svc = CardService.instance
                 if (svc != null) svc.saveTest()
@@ -721,7 +771,8 @@ class MainActivity : Activity() {
             addView(viewBtn("Últimos toques (Uber, 99, Easymob)", "clicks"), lp(top = 8))
             addView(viewBtn("Último OCR que falhou", "ocrfail"), lp(top = 8))
             addView(viewBtn("Último erro interno", "lasterr"), lp(top = 8))
-            addView(viewBtn("Registro do Easymob (arrasto)", "easylog"), lp(top = 8))
+            addView(viewBtn("Registro de aceites (provável e arrasto)", "easylog"), lp(top = 8))
+            addView(viewBtn("Texto da tela depois da oferta", "post"), lp(top = 8))
             addView(out, lp(top = 12))
         }
         val arrow = tv("▾", 18f, MUTED)
@@ -916,6 +967,15 @@ class MainActivity : Activity() {
             }, lp(bottom = 8))
             addView(tv("Mostra o cartão de verdade por 6 segundos. A cada toque troca a cor.", 12f, MUTED), lp(bottom = 16))
             addView(button("Restaurar padrão", false) { resetCardPrefs() }, lp())
+            if (License.enabled(this@MainActivity)) {
+                addView(tv("Conta", 14f, TEXT, true), lp(top = 24, bottom = 6))
+                addView(tv("Usuário " + License.user(this@MainActivity), 13f, MUTED), lp(bottom = 8))
+                addView(button("Sair da conta", false) {
+                    License.logout(this@MainActivity)
+                    startActivity(Intent(this@MainActivity, LoginActivity::class.java))
+                    finish()
+                }, lp())
+            }
         }
         scrim = View(this).apply {
             setBackgroundColor(Color.parseColor("#99000000"))
@@ -955,6 +1015,7 @@ class MainActivity : Activity() {
         refreshSeg()
         updatePreview()
         refreshStats()
+        refreshLicense()
 
         refreshPower()
         refreshA11y()

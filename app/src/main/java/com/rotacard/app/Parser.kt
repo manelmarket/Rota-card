@@ -37,6 +37,26 @@ object Parser {
     fun countdown(text: String): Int? =
         COUNT.findAll(text).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
 
+    private val PERKM = Regex("""(\d{1,2}[,.]\d{2})\s*/\s*km""")
+    private val MINS = Regex("""(\d+)\s*min""")
+
+    /** Plano B do OCR: se as distancias nao foram lidas, usa o valor e o "R$/km" que a propria 99 mostra. */
+    private fun fallbackByPerKm(text: String): Offer? {
+        val pk = PERKM.find(text) ?: return null
+        val per = num(pk.groupValues[1])
+        if (per < 0.3 || per > 15.0) return null
+        val prices = PRICE_OCR.findAll(text).toList().filter { it.range.first < pk.range.first }
+        val pm = prices.maxByOrNull { price(it) } ?: return null
+        val p = price(pm)
+        val total = p / per
+        if (total <= 0.0 || total > 400.0) return null
+        val mins = MINS.findAll(text).map { it.groupValues[1].toDouble() }.take(2).toList()
+        val rating = if (pm.range.last + 1 < pk.range.first)
+            RATING.find(text.substring(pm.range.last + 1, pk.range.first))?.groupValues?.get(1)?.let { num(it) }
+        else null
+        return Offer(labelFor(text, true), p, rating, 0.0, total, 0.0, mins.sum(), true)
+    }
+
     private fun labelFor(text: String, ocr: Boolean): String {
         val is99 = text.contains("corridas") || text.contains("Pgto") ||
                 text.contains("Dinheiro") || text.contains("CPF verif")
@@ -95,6 +115,6 @@ object Parser {
                 legMin(legs[0]), legMin(legs[1]), false, ocr
             )
         }
-        return null
+        return if (ocr) fallbackByPerKm(text) else null
     }
 }
