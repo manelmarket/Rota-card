@@ -1,6 +1,8 @@
 package com.rotacard.app
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.res.ColorStateList
@@ -65,6 +67,18 @@ class MainActivity : Activity() {
     private lateinit var a11yText: TextView
     private lateinit var a11yDot: View
     private lateinit var licText: TextView
+
+    // faixas por app, decisao, meta e turno
+    private var selApp = ""
+    private val appChips = ArrayList<TextView>()
+    private lateinit var goalBar: GoalBarView
+    private lateinit var goalText: TextView
+    private lateinit var shiftText: TextView
+    private lateinit var shiftBtn: TextView
+    private lateinit var goalF: EditText
+    private lateinit var minHourF: EditText
+    private lateinit var maxPickupF: EditText
+    private lateinit var costF: EditText
     private lateinit var greenF: EditText
     private lateinit var yellowF: EditText
     private lateinit var ratingF: EditText
@@ -244,6 +258,74 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun sfx() = if (selApp.isEmpty()) "" else "_$selApp"
+
+    private fun loadFields() {
+        val sf = sfx()
+        greenF.setText(prefs.getFloat("green" + sf, prefs.getFloat("green", 2.0f)).toString())
+        yellowF.setText(prefs.getFloat("yellow" + sf, prefs.getFloat("yellow", 1.5f)).toString())
+        updateScale(false)
+    }
+
+    private fun styleAppChips() {
+        appChips.forEachIndexed { i, c ->
+            val sel = if (i == 0) selApp.isEmpty() else c.text.toString() == selApp
+            c.setTextColor(if (sel) Color.parseColor("#04121A") else TEXT)
+            c.background = if (sel)
+                GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(CYAN, Color.parseColor("#3B82F6")))
+                    .apply { cornerRadius = dp(12).toFloat() }
+            else bg(Color.parseColor("#0C1322"), 12, STROKE)
+        }
+    }
+
+    private fun shiftSummary(start: Long, prefix: String): String {
+        val rides = History.load(this).filter { it.id >= start && it.hasData }
+        val gross = rides.sumOf { it.price }
+        val cost = rides.sumOf { it.cost }
+        val ms = System.currentTimeMillis() - start
+        val hours = ms / 3600000.0
+        val m = ms / 60000
+        val perH = if (hours > 0.05) gross / hours else 0.0
+        return prefix + (m / 60) + "h" + (m % 60).toString().padStart(2, '0') + " • " + rides.size +
+                " corridas • " + Fmt.money(gross) + " • R$ " + Fmt.n0(perH) + "/h real" +
+                (if (cost > 0.0) " • líquido " + Fmt.money(gross - cost) else "")
+    }
+
+    private fun toggleShift() {
+        val start = prefs.getLong("shiftStart", 0L)
+        if (start == 0L) {
+            prefs.edit().putLong("shiftStart", System.currentTimeMillis()).apply()
+        } else {
+            val summary = shiftSummary(start, "Último turno: ")
+            prefs.edit().putLong("shiftStart", 0L).putString("lastShift", summary).apply()
+        }
+        refreshGoalShift()
+    }
+
+    private fun refreshGoalShift() {
+        if (!::goalBar.isInitialized) return
+        val goal = prefs.getFloat("goal", 0f)
+        val got = Stats.load(this).accSum
+        if (goal > 0f) {
+            val frac = (got / goal).toFloat()
+            goalBar.set(frac)
+            goalText.text = Fmt.money(got) + " de " + Fmt.money(goal.toDouble()) +
+                    "  (" + (frac * 100).roundToInt() + "%)" + (if (got >= goal) "  •  meta batida!" else "")
+        } else {
+            goalBar.set(0f)
+            goalText.text = "Defina uma meta para acompanhar o dia. Aceitas hoje: " + Fmt.money(got)
+        }
+        val start = prefs.getLong("shiftStart", 0L)
+        if (start > 0L) {
+            shiftText.text = shiftSummary(start, "Turno em andamento: ")
+            shiftBtn.text = "Encerrar turno"
+        } else {
+            val last = prefs.getString("lastShift", "") ?: ""
+            shiftText.text = if (last.isEmpty()) "Inicie o turno para ver o ganho por hora real, contando o tempo parado." else last
+            shiftBtn.text = "Iniciar turno"
+        }
+    }
+
     private fun refreshLicense() {
         if (!License.enabled(this)) { licText.visibility = View.GONE; return }
         val d = License.daysLeft(this)
@@ -344,6 +426,7 @@ class MainActivity : Activity() {
     private fun refreshStats() {
         if (!::statCount.isInitialized) return
         refreshLast()
+        refreshGoalShift()
         val st = Stats.load(this)
         statCount.text = st.count.toString()
         if (st.count == 0) {
@@ -586,6 +669,10 @@ class MainActivity : Activity() {
             finish()
             return
         }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
+        }
         window.statusBarColor = BG
         window.navigationBarColor = BG
 
@@ -689,7 +776,29 @@ class MainActivity : Activity() {
         }
 
         // ---- faixas de R$/km
+        val appRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Geral", "Uber", "99", "Easymob").forEachIndexed { i, name ->
+            val c = tv(name, 13f, TEXT, true).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(6), dp(8), dp(6), dp(8))
+                isClickable = true
+                setOnClickListener {
+                    selApp = if (i == 0) "" else name
+                    styleAppChips()
+                    loadFields()
+                }
+            }
+            appChips.add(c)
+            appRow.addView(
+                c,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { if (i > 0) leftMargin = dp(6) }
+            )
+        }
+        styleAppChips()
         val faixas = card("Quando o cartão fica verde ou vermelho") {
+            addView(tv("Valores para:", 12f, MUTED), lp(bottom = 6))
+            addView(appRow, lp(bottom = 12))
             addView(scale, lp(bottom = 12))
             addView(row(GREEN, "Verde a partir de R$/km", greenF), lp(bottom = 10))
             addView(row(AMBER, "Amarelo a partir de R$/km", yellowF), lp(bottom = 10))
@@ -697,8 +806,8 @@ class MainActivity : Activity() {
             addView(button("Salvar faixas", true) {
                 try {
                     prefs.edit()
-                        .putFloat("green", greenF.text.toString().replace(',', '.').toFloat())
-                        .putFloat("yellow", yellowF.text.toString().replace(',', '.').toFloat())
+                        .putFloat("green" + sfx(), greenF.text.toString().replace(',', '.').toFloat())
+                        .putFloat("yellow" + sfx(), yellowF.text.toString().replace(',', '.').toFloat())
                         .putFloat("minRating", ratingF.text.toString().replace(',', '.').toFloat())
                         .apply()
                     updateScale(true)
@@ -711,6 +820,16 @@ class MainActivity : Activity() {
 
         // ---- leitura
         val leitura = card("Leitura das ofertas") {
+            addView(switchRow("Guardar print das ofertas não lidas", prefs.getBoolean("saveFails", true)) {
+                prefs.edit().putBoolean("saveFails", it).apply()
+            }, lp())
+            addView(switchRow("Notificação com atalho Pausar/Retomar", prefs.getBoolean("notif", true)) {
+                prefs.edit().putBoolean("notif", it).apply()
+                CardService.instance?.refreshNotification()
+            }, lp(bottom = 8))
+            addView(button("Saúde do app", false) {
+                startActivity(Intent(this@MainActivity, HealthActivity::class.java))
+            }, lp(bottom = 12))
             addView(switchRow("Ler a 99 por imagem (OCR)", prefs.getBoolean("ocr99", true)) {
                 prefs.edit().putBoolean("ocr99", it).apply()
             }, lp())
@@ -990,13 +1109,69 @@ class MainActivity : Activity() {
             addView(drawerContent)
         }
 
+        // ---- meta e turno
+        goalBar = GoalBarView(this)
+        goalText = tv("", 13f, MUTED)
+        shiftText = tv("", 13f, MUTED)
+        shiftBtn = button("Iniciar turno", false) { toggleShift() }
+        goalF = input(prefs.getFloat("goal", 0f).let { if (it > 0f) it.toString() else "" }, "R$")
+        val metas = card("Meta e turno") {
+            addView(goalBar, lp(bottom = 8))
+            addView(goalText, lp(bottom = 12))
+            addView(row(null, "Meta do dia (R$)", goalF), lp(bottom = 10))
+            addView(button("Salvar meta", false) {
+                val v = goalF.text.toString().replace(',', '.').toFloatOrNull() ?: 0f
+                prefs.edit().putFloat("goal", if (v > 0f) v else 0f).apply()
+                refreshGoalShift()
+                Toast.makeText(context, "Meta salva", Toast.LENGTH_SHORT).show()
+            }, lp(bottom = 16))
+            addView(shiftText, lp(bottom = 10))
+            addView(shiftBtn, lp())
+        }
+
+        // ---- decisao do cartao
+        minHourF = input(prefs.getFloat("minHour", 40f).toString(), "R$/h")
+        maxPickupF = input(prefs.getFloat("maxPickup", 3f).toString(), "km")
+        costF = input(prefs.getFloat("costKm", 0f).toString(), "R$/km")
+        val decisao = card("Decisão do cartão") {
+            addView(switchRow("Mostrar o veredito (Aceitar, Pensar, Recusar)", prefs.getBoolean("showVerdict", true)) {
+                prefs.edit().putBoolean("showVerdict", it).apply()
+            }, lp())
+            addView(switchRow("Falar o veredito em voz alta", prefs.getBoolean("voice", false)) {
+                prefs.edit().putBoolean("voice", it).apply()
+            }, lp(bottom = 8))
+            addView(button("Testar voz", false) {
+                val svc = CardService.instance
+                if (svc != null) svc.speakTest()
+                else Toast.makeText(this@MainActivity, "Ative o serviço de acessibilidade primeiro", Toast.LENGTH_LONG).show()
+            }, lp(bottom = 14))
+            addView(row(null, "R$/hora mínimo", minHourF), lp(bottom = 10))
+            addView(row(null, "Busca máxima (km)", maxPickupF), lp(bottom = 10))
+            addView(row(null, "Custo por km do carro (R$)", costF), lp(bottom = 6))
+            addView(tv("Com o custo por km, o cartão mostra o lucro líquido de cada corrida. Deixe 0 para desligar.", 12f, MUTED), lp(bottom = 12))
+            addView(button("Salvar decisão", true) {
+                try {
+                    prefs.edit()
+                        .putFloat("minHour", minHourF.text.toString().replace(',', '.').toFloat())
+                        .putFloat("maxPickup", maxPickupF.text.toString().replace(',', '.').toFloat())
+                        .putFloat("costKm", costF.text.toString().replace(',', '.').toFloat())
+                        .apply()
+                    Toast.makeText(context, "Decisão salva", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Valor inválido", Toast.LENGTH_SHORT).show()
+                }
+            }, lp())
+        }
+
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(36), dp(18), dp(28))
             addView(header, lp(bottom = 6))
             addView(hero, lp(bottom = 22))
             addView(resumo, lp(bottom = 14))
+            addView(metas, lp(bottom = 14))
             addView(faixas, lp(bottom = 14))
+            addView(decisao, lp(bottom = 14))
             addView(leitura, lp(bottom = 14))
             addView(update, lp(bottom = 14))
             addView(diag, lp())

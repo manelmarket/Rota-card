@@ -112,14 +112,14 @@ class HistoryActivity : Activity() {
             pressable(this)
         }
 
-    private fun levelColor(perKm: Double?): Int {
+    private fun levelColor(perKm: Double?, app: String? = null): Int {
         if (perKm == null) return MUTED
-        return when (CardPrefs.level(perKm, CardPrefs.load(this))) { 2 -> GREEN; 1 -> AMBER; else -> RED }
+        return when (CardPrefs.level(perKm, CardPrefs.load(this, app))) { 2 -> GREEN; 1 -> AMBER; else -> RED }
     }
 
-    private fun levelName(perKm: Double?): String {
+    private fun levelName(perKm: Double?, app: String? = null): String {
         if (perKm == null) return "--"
-        return when (CardPrefs.level(perKm, CardPrefs.load(this))) { 2 -> "Verde"; 1 -> "Amarela"; else -> "Vermelha" }
+        return when (CardPrefs.level(perKm, CardPrefs.load(this, app))) { 2 -> "Verde"; 1 -> "Amarela"; else -> "Vermelha" }
     }
 
     private fun startOfToday(): Long {
@@ -312,6 +312,10 @@ class HistoryActivity : Activity() {
             1 -> "1 corrida aceita"
             else -> "${rides.size} corridas aceitas"
         }
+        val totalCost = withData.sumOf { it.cost }
+        if (totalCost > 0.0) {
+            sumCount.text = sumCount.text.toString() + "  •  líquido " + Fmt.money(totalPrice - totalCost)
+        }
         mKm.text = if (totalKm > 0.0) "R$ " + Fmt.d2(totalPrice / totalKm) else "--"
         mHour.text = if (hours > 0.0) "R$ " + Fmt.n0(timed.sumOf { it.price } / hours) else "--"
         mDist.text = if (totalKm > 0.0) Fmt.d1(totalKm) + " km" else "--"
@@ -358,7 +362,7 @@ class HistoryActivity : Activity() {
     private fun rideRow(r: Ride): View {
         val time = SimpleDateFormat("HH:mm", pt).format(Date(r.id))
         val perKm = r.perKm
-        val col = levelColor(perKm)
+        val col = levelColor(perKm, r.app)
 
         val thumb = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
@@ -490,7 +494,7 @@ class HistoryActivity : Activity() {
     private fun openPanel(r: Ride) {
         panelBody.removeAllViews()
         val perKm = r.perKm
-        val col = levelColor(perKm)
+        val col = levelColor(perKm, r.app)
         val til = if (r.minEstimated) "~" else ""
 
         panelBody.addView(
@@ -532,11 +536,15 @@ class HistoryActivity : Activity() {
             val h = r.perHour
             panelBody.addView(detailRow("Valor da corrida", Fmt.money(r.price)))
             panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            if (r.cost > 0.0) {
+                panelBody.addView(detailRow("Líquido (após custo por km)", Fmt.money(r.price - r.cost), GREEN))
+                panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            }
             panelBody.addView(detailRow("Ganho por km", "R$ " + Fmt.d2(perKm ?: 0.0) + "/km", col))
             panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
             panelBody.addView(detailRow("Ganho por hora", if (h != null) til + "R$ " + Fmt.n0(h) + "/h" else "--"))
             panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
-            panelBody.addView(detailRow("Classificação", levelName(perKm), col))
+            panelBody.addView(detailRow("Classificação", levelName(perKm, r.app), col))
             panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
             panelBody.addView(detailRow("Distância total", Fmt.d1(r.totalKm) + " km"))
             panelBody.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))

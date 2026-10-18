@@ -11,6 +11,7 @@ import android.text.Spanned
 import android.text.style.RelativeSizeSpan
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -23,17 +24,54 @@ data class CardSettings(
     val textScale: Float,
     val opacity: Float,
     val atBottom: Boolean,
-    val vibrate: Boolean
+    val vibrate: Boolean,
+    val minHour: Float,
+    val maxPickup: Float,
+    val costKm: Float,
+    val showVerdict: Boolean,
+    val voice: Boolean
 )
 
+data class Verdict(val code: Int, val text: String)
+
 object CardPrefs {
-    fun load(ctx: Context): CardSettings {
+    /** Se "app" for informado, usa as faixas proprias daquele app (ou as gerais, se nao houver). */
+    fun load(ctx: Context, app: String? = null): CardSettings {
         val p = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val sf = if (app == null) "" else "_$app"
+        val g = p.getFloat("green" + sf, p.getFloat("green", 2.0f))
+        val y = p.getFloat("yellow" + sf, p.getFloat("yellow", 1.5f))
         return CardSettings(
-            p.getFloat("green", 2.0f), p.getFloat("yellow", 1.5f), p.getFloat("minRating", 4.8f),
+            g, y, p.getFloat("minRating", 4.8f),
             p.getFloat("textScale", 1.0f), p.getFloat("opacity", 1.0f),
-            p.getBoolean("atBottom", false), p.getBoolean("vibrate", true)
+            p.getBoolean("atBottom", false), p.getBoolean("vibrate", true),
+            p.getFloat("minHour", 40f), p.getFloat("maxPickup", 3f), p.getFloat("costKm", 0f),
+            p.getBoolean("showVerdict", true), p.getBoolean("voice", false)
         )
+    }
+
+    /** Lucro estimado depois do custo por km (null se o custo nao foi informado). */
+    fun net(o: Offer, s: CardSettings): Double? =
+        if (s.costKm > 0f) o.price - s.costKm * o.totalKm else null
+
+    /** Aceitar, Pensar ou Recusar, juntando R$/km, R$/h, busca e nota. */
+    fun verdict(o: Offer, s: CardSettings): Verdict {
+        val reasons = ArrayList<String>()
+        val h = o.perHour
+        if (s.minHour > 0f && h != null && h < s.minHour) reasons.add("R$/h baixo")
+        if (s.maxPickup > 0f && o.pickupKm > s.maxPickup) reasons.add("busca longa")
+        val r = o.rating
+        if (r != null && r < s.minRating) reasons.add("nota baixa")
+        val level = level(o.perKm, s)
+        val code = when {
+            level == 0 -> 0
+            level == 2 && reasons.isEmpty() -> 2
+            reasons.size >= 2 -> 0
+            else -> 1
+        }
+        val head = when (code) { 2 -> "✔ ACEITAR"; 1 -> "● PENSAR"; else -> "✖ RECUSAR" }
+        val txt = if (reasons.isEmpty()) head else head + ": " + reasons.joinToString(", ")
+        return Verdict(code, txt)
     }
 
     /** 2 = verde, 1 = amarelo, 0 = vermelho */
@@ -85,11 +123,19 @@ class CardUi(ctx: Context) {
         gravity = Gravity.CENTER
         maxLines = 1
     }
+    private val verdictTv = TextView(ctx).apply {
+        setTextColor(Color.WHITE)
+        textSize = 13f
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        gravity = Gravity.CENTER
+        maxLines = 1
+    }
     val root = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(16), dp(10), dp(16), dp(10))
         addView(big, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         addView(small, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(verdictTv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
     private var lastScale = -1f
 
@@ -113,6 +159,9 @@ class CardUi(ctx: Context) {
             small.setAutoSizeTextTypeUniformWithConfiguration(
                 (9 * s.textScale).toInt().coerceAtLeast(8), (14 * s.textScale).toInt(), 1, TypedValue.COMPLEX_UNIT_SP
             )
+            verdictTv.setAutoSizeTextTypeUniformWithConfiguration(
+                (9 * s.textScale).toInt().coerceAtLeast(8), (13 * s.textScale).toInt(), 1, TypedValue.COMPLEX_UNIT_SP
+            )
         }
 
         val ratingTxt = o.rating?.let {
@@ -133,5 +182,14 @@ class CardUi(ctx: Context) {
             Locale.US, "%s  •  %.1f km  •  %s%.0f min  •  R$ %.2f  •  %s",
             ratingTxt, o.totalKm, til, o.totalMin, o.price, o.app
         ).replace('.', ',')
+
+        if (s.showVerdict) {
+            val v = CardPrefs.verdict(o, s)
+            val net = CardPrefs.net(o, s)
+            verdictTv.visibility = View.VISIBLE
+            verdictTv.text = v.text + (if (net != null) "  •  líquido " + Fmt.money(net) else "")
+        } else {
+            verdictTv.visibility = View.GONE
+        }
     }
 }

@@ -82,6 +82,13 @@ class CardService : AccessibilityService() {
     private var curFirstAt = 0L
     private var goneHandled = false
     private var lastLeftLog = 0L
+
+    // voz, notificacao e prints das ofertas nao lidas
+    private var tts: android.speech.tts.TextToSpeech? = null
+    private var ttsReady = false
+    private var ttsPending: String? = null
+    private var lastNotifAt = 0L
+    private var lastFailShotAt = 0L
     private val fastRunnable = object : Runnable {
         override fun run() {
             try { fastTick() } catch (_: Throwable) { }
@@ -112,6 +119,7 @@ class CardService : AccessibilityService() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         running = true
         instance = this
+        refreshNotification()
         handler.postDelayed(loopRunnable, 800)
     }
 
@@ -132,6 +140,7 @@ class CardService : AccessibilityService() {
         if (instance === this) instance = null
         handler.removeCallbacksAndMessages(null)
         removeCard(); removeDbg()
+        try { (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager).cancel(1) } catch (_: Throwable) { }
         return super.onUnbind(intent)
     }
 
@@ -140,6 +149,7 @@ class CardService : AccessibilityService() {
         if (instance === this) instance = null
         handler.removeCallbacksAndMessages(null)
         removeCard(); removeDbg()
+        try { tts?.shutdown() } catch (_: Throwable) { }
         super.onDestroy()
     }
 
@@ -174,6 +184,8 @@ class CardService : AccessibilityService() {
         if (!::wm.isInitialized) return
         if (!License.canRun(this)) { removeCard(); removeDbg(); return }
         License.checkAsync(this, false) { }
+        Health.lastScan = SystemClock.elapsedRealtime()
+        if (SystemClock.elapsedRealtime() - lastNotifAt > 30000) refreshNotification()
         if (SystemClock.uptimeMillis() < testUntil) return
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         if (!prefs.getBoolean("enabled", true)) {
@@ -244,6 +256,10 @@ class CardService : AccessibilityService() {
         val needOcr = offer == null && (big99 || cardLike) && prefs.getBoolean("ocr99", true)
         val shown = offer ?: (if (SystemClock.uptimeMillis() - ocrAt < 3000) ocrOffer else null)
         val saveOn = prefs.getBoolean("saveAccepted", true)
+        // Uber/Easymob: tinha texto de oferta mas nao deu para ler -> guarda um print para eu poder corrigir
+        if (offer == null && failText.isNotEmpty() && failureAllowed()) {
+            takeShot { b -> writeFailure(b, "Arvore") }
+        }
         if (needOcr || (saveOn && shown != null)) capture(needOcr, debug, shown?.let { offerKey(it) })
         val nowMs = SystemClock.uptimeMillis()
         if (shown != null) {
@@ -308,8 +324,10 @@ class CardService : AccessibilityService() {
         if (key == candKey) candCount++ else { candKey = key; candCount = 1 }
         if (candCount < 2) return
         lastKey = key; lastKeyAt = now; candKey = ""; candCount = 0
-        val s = CardPrefs.load(this)
+        val s = CardPrefs.load(this, o.app)
         Stats.record(this, o, s)
+        Health.inc(this, "read_" + o.app)
+        if (s.voice) speakVerdict(o, s)
         if (s.vibrate && CardPrefs.level(o.perKm, s) == 2) Haptics.pulse(this)
     }
 
@@ -365,6 +383,12 @@ class CardService : AccessibilityService() {
                         shotBusy = false
                         onOcrText(vt.text, debug)
                         ocrOffer?.let { lastShotKey = offerKey(it) }
+                        if (ocrOffer != null) {
+                            Health.inc(this, "ocr_ok")
+                        } else if (looksLikeOffer(vt.text)) {
+                            Health.inc(this, "ocr_fail")
+                            if (failureAllowed()) writeFailure(bmp, "OCR")
+                        }
                     }
                     .addOnFailureListener { shotBusy = false; ocrState = "falhou" }
             } catch (e: Throwable) {
@@ -505,7 +529,10 @@ class CardService : AccessibilityService() {
             }
             if (label != "Teste") {
                 try {
-                    History.add(this, Ride.from(o, id, label, thumb, gallery, guess))
+                    History.add(this, Ride.from(
+                        o, id, label, thumb, gallery, guess,
+                        if (o != null) CardPrefs.load(this).costKm * o.totalKm else 0.0
+                    ))
                 } catch (t: Throwable) {
                     getSharedPreferences("cfg", MODE_PRIVATE).edit()
                         .putString("lasterr", "historico: " + t.javaClass.simpleName + " " + (t.message ?: "")).apply()
@@ -553,6 +580,113 @@ class CardService : AccessibilityService() {
             if (b != null) saveShot(b, null, "Teste")
             else Toast.makeText(this, "Não consegui capturar a tela (erro $shotErr)", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun looksLikeOffer(text: String): Boolean =
+        (text.contains("km") && text.contains("min")) || (text.contains("R$") && text.contains("km"))
+
+    /** No maximo 1 print a cada 20 s e 30 por dia, para nao encher a galeria. */
+    private fun failureAllowed(): Boolean {
+        val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+        if (!prefs.getBoolean("saveFails", true)) return false
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFailShotAt < 20000) return false
+        val capKey = "failcap_" + SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        val n = prefs.getInt(capKey, 0)
+        if (n >= 30) return false
+        prefs.edit().putInt(capKey, n + 1).apply()
+        lastFailShotAt = now
+        Health.inc(this, "unread")
+        return true
+    }
+
+    private fun writeFailure(bmp: Bitmap?, tag: String) {
+        if (bmp == null) return
+        Thread {
+            try {
+                val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "Falha_${ts}_$tag.jpg")
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/RotaCard/Falhas")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                }
+            } catch (_: Throwable) { }
+        }.start()
+    }
+
+    private fun speak(text: String) {
+        try {
+            val t = tts
+            if (t == null) {
+                ttsPending = text
+                tts = android.speech.tts.TextToSpeech(this) { st ->
+                    if (st == android.speech.tts.TextToSpeech.SUCCESS) {
+                        tts?.language = Locale.forLanguageTag("pt-BR")
+                        ttsReady = true
+                        ttsPending?.let { p ->
+                            tts?.speak(p, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "rc")
+                        }
+                        ttsPending = null
+                    }
+                }
+            } else if (ttsReady) {
+                t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "rc")
+            } else {
+                ttsPending = text
+            }
+        } catch (_: Throwable) { }
+    }
+
+    private fun speakVerdict(o: Offer, s: CardSettings) {
+        val v = CardPrefs.verdict(o, s)
+        val word = when (v.code) { 2 -> "Aceitar"; 1 -> "Pensar"; else -> "Recusar" }
+        speak(word + ". " + String.format(Locale.US, "%.2f", o.perKm).replace('.', ',') + " reais por quilômetro.")
+    }
+
+    /** Chamado pelo app: fala uma frase de exemplo. */
+    fun speakTest() {
+        speak("Aceitar. 2,80 reais por quilômetro.")
+    }
+
+    /** Notificacao fixa com o status e o atalho Pausar/Retomar. */
+    fun refreshNotification() {
+        try {
+            val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+            val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            if (!prefs.getBoolean("notif", true)) { nm.cancel(1); return }
+            nm.createNotificationChannel(
+                android.app.NotificationChannel("rotacard_status", "Status do Rota Card", android.app.NotificationManager.IMPORTANCE_LOW)
+            )
+            val on = prefs.getBoolean("enabled", true)
+            val st = Stats.load(this)
+            val flags = android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            val toggle = android.app.PendingIntent.getBroadcast(this, 1, Intent(this, NotifyReceiver::class.java), flags)
+            val open = android.app.PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java), flags)
+            val action = android.app.Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_stat),
+                if (on) "Pausar" else "Retomar",
+                toggle
+            ).build()
+            val n = android.app.Notification.Builder(this, "rotacard_status")
+                .setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle(if (on) "Rota Card lendo ofertas" else "Rota Card pausado")
+                .setContentText(st.count.toString() + " ofertas hoje • " + st.accepted + " aceitas")
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(open)
+                .addAction(action)
+                .build()
+            nm.notify(1, n)
+            lastNotifAt = SystemClock.elapsedRealtime()
+        } catch (_: Throwable) { }
     }
 
     private fun easyLogAdd(line: String) {
@@ -693,7 +827,7 @@ class CardService : AccessibilityService() {
     }
 
     private fun showCard(o: Offer) {
-        val s = CardPrefs.load(this)
+        val s = CardPrefs.load(this, o.app)
         if (cardUi != null && cardAtBottom != s.atBottom) removeCard()
         var ui = cardUi
         if (ui == null) {

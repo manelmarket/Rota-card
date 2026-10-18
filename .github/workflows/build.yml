@@ -31,6 +31,23 @@ jobs:
             echo "::error::$line"
             echo "- \`$line\`" >> $GITHUB_STEP_SUMMARY
           done
+      - name: Testes do leitor de ofertas
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle testDebugUnitTest --no-daemon -PverCode=$VERCODE 2>&1 | tee tests.log
+      - name: Resumo dos testes
+        if: always()
+        run: |
+          echo "### Testes do leitor" >> $GITHUB_STEP_SUMMARY
+          if grep -q "FAILED" tests.log 2>/dev/null; then
+            grep -E "FAILED|AssertionError|Expected|expected" tests.log | head -20 | while IFS= read -r line; do
+              echo "::warning::$line"
+              echo "- \`$line\`" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "Todos os testes passaram." >> $GITHUB_STEP_SUMMARY
+          fi
       - name: Renomear APK
         run: cp app/build/outputs/apk/debug/app-debug.apk RotaCard.apk
       - uses: actions/upload-artifact@v4

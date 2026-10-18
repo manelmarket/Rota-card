@@ -11,7 +11,7 @@ android {
         targetSdk = 34
         val verCode = (project.findProperty("verCode") as String?)?.toIntOrNull() ?: 4
         versionCode = verCode
-        versionName = "2.5 (build $verCode)"
+        versionName = "2.6 (build $verCode)"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -33,4 +33,5 @@ android {
 dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("androidx.core:core-ktx:1.13.1")
+    testImplementation("junit:junit:4.13.2")
 }
