@@ -38,6 +38,7 @@ class CardService : AccessibilityService() {
     private lateinit var wm: WindowManager
     private var cardUi: CardUi? = null
     private var cardAtBottom = false
+    private var cardPos = ""
     private var dbg: TextView? = null
     private val handler = Handler(Looper.getMainLooper())
     private var scanPending = false
@@ -826,17 +827,29 @@ class CardService : AccessibilityService() {
         dbg = null
     }
 
+    private fun cardParams(s: CardSettings): WindowManager.LayoutParams {
+        if (s.cardY >= 0f) {
+            val lp = overlayParams(0, false)
+            val h = resources.displayMetrics.heightPixels
+            lp.y = (s.cardY * (h - dp(130))).toInt().coerceAtLeast(0)
+            return lp
+        }
+        return overlayParams(if (s.atBottom) 48 else 36, s.atBottom)
+    }
+
     private fun showCard(o: Offer) {
         val s = CardPrefs.load(this, o.app)
-        if (cardUi != null && cardAtBottom != s.atBottom) removeCard()
+        val posKey = s.atBottom.toString() + "|" + s.cardY
+        if (cardUi != null && cardPos != posKey) removeCard()
         var ui = cardUi
         if (ui == null) {
             ui = CardUi(this)
             ui.bind(o, s)
-            try { wm.addView(ui.root, overlayParams(if (s.atBottom) 48 else 36, s.atBottom)) }
+            try { wm.addView(ui.root, cardParams(s)) }
             catch (_: Exception) { return }
             cardUi = ui
             cardAtBottom = s.atBottom
+            cardPos = posKey
             ui.root.alpha = 0f
             ui.root.translationY = (if (s.atBottom) dp(14) else -dp(14)).toFloat()
             ui.root.animate().alpha(s.opacity).translationY(0f).setDuration(180).start()

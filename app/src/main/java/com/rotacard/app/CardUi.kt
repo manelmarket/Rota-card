@@ -29,7 +29,8 @@ data class CardSettings(
     val maxPickup: Float,
     val costKm: Float,
     val showVerdict: Boolean,
-    val voice: Boolean
+    val voice: Boolean,
+    val cardY: Float
 )
 
 data class Verdict(val code: Int, val text: String)
@@ -39,14 +40,17 @@ object CardPrefs {
     fun load(ctx: Context, app: String? = null): CardSettings {
         val p = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
         val sf = if (app == null) "" else "_$app"
-        val g = p.getFloat("green" + sf, p.getFloat("green", 2.0f))
-        val y = p.getFloat("yellow" + sf, p.getFloat("yellow", 1.5f))
+        val g = p.getFloat("green" + sf, p.getFloat("green", License.dflt(ctx, "green", 2.0f)))
+        val y = p.getFloat("yellow" + sf, p.getFloat("yellow", License.dflt(ctx, "yellow", 1.5f)))
         return CardSettings(
-            g, y, p.getFloat("minRating", 4.8f),
+            g, y, p.getFloat("minRating", License.dflt(ctx, "minRating", 4.8f)),
             p.getFloat("textScale", 1.0f), p.getFloat("opacity", 1.0f),
             p.getBoolean("atBottom", false), p.getBoolean("vibrate", true),
-            p.getFloat("minHour", 40f), p.getFloat("maxPickup", 3f), p.getFloat("costKm", 0f),
-            p.getBoolean("showVerdict", true), p.getBoolean("voice", false)
+            p.getFloat("minHour", License.dflt(ctx, "minHour", 40f)),
+            p.getFloat("maxPickup", License.dflt(ctx, "maxPickup", 3f)),
+            p.getFloat("costKm", 0f),
+            p.getBoolean("showVerdict", true), p.getBoolean("voice", false),
+            p.getFloat("cardY", -1f)
         )
     }
 

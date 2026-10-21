@@ -98,6 +98,32 @@ object History {
         writeAll(ctx, list)
     }
 
+    /** Junta ofertas de um backup sem duplicar (compara pelo id). Devolve quantas entraram. */
+    fun merge(ctx: Context, json: String): Int = synchronized(lock) {
+        val cur = readAll(ctx)
+        val ids = HashSet<Long>()
+        cur.forEach { ids.add(it.id) }
+        var added = 0
+        try {
+            val arr = JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val r = fromJson(arr.getJSONObject(i))
+                if (!ids.contains(r.id)) {
+                    cur.add(r)
+                    ids.add(r.id)
+                    added++
+                }
+            }
+        } catch (_: Exception) { }
+        cur.sortBy { it.id }
+        while (cur.size > MAX) {
+            val old = cur.removeAt(0)
+            old.shot?.let { shotFile(ctx, it).delete() }
+        }
+        writeAll(ctx, cur)
+        added
+    }
+
     fun delete(ctx: Context, id: Long) = synchronized(lock) {
         val list = readAll(ctx)
         list.filter { it.id == id }.forEach { r -> r.shot?.let { shotFile(ctx, it).delete() } }

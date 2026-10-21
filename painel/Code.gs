@@ -12,7 +12,7 @@
 
 const ABA = 'usuarios';
 const COLS = ['usuario', 'senhaHash', 'nome', 'criadoEm', 'dias', 'contar', 'expiraEm', 'expiraEmTexto',
-  'ativo', 'dispositivo', 'token', 'ultimoAcesso'];
+  'ativo', 'dispositivo', 'token', 'ultimoAcesso', 'aviso', 'versao', 'ofertasHoje', 'aceitasHoje', 'diaStats'];
 const DIA = 24 * 60 * 60 * 1000;
 const LINK_APP = 'https://github.com/manelmarket/Rota-card/releases/latest';
 
@@ -31,6 +31,7 @@ function sheet_() {
 
 function configurar() {
   const sh = sheet_();
+  sh.getRange(1, 1, 1, COLS.length).setValues([COLS]);
   sh.getRange('A2:B2000').setNumberFormat('@');
   sh.getRange('J2:K2000').setNumberFormat('@');
   salt_();
@@ -110,6 +111,29 @@ function clearFail_(key) { CacheService.getScriptCache().remove(key); }
 
 function fail_(code, msg) { return { ok: false, code: code, msg: msg }; }
 
+/* Configuracao global (vale para todos): aviso, versao minima e valores padrao */
+function cfg_() {
+  const p = PropertiesService.getScriptProperties();
+  let d = {};
+  try { d = JSON.parse(p.getProperty('DEFAULTS') || '{}'); } catch (e) { d = {}; }
+  return { aviso: p.getProperty('AVISO') || '', minVer: Number(p.getProperty('MIN_VER') || 0), defaults: d };
+}
+
+function extra_(row) {
+  const c = cfg_();
+  return { notice: row.aviso ? String(row.aviso) : c.aviso, minVer: c.minVer, defaults: c.defaults };
+}
+
+function verCheck_(req) {
+  const mv = cfg_().minVer;
+  if (mv && Number(req.ver || 0) < mv) {
+    const r = fail_('update', 'Atualize o aplicativo para continuar (versão mínima ' + mv + ').');
+    r.minVer = mv;
+    return r;
+  }
+  return null;
+}
+
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -143,6 +167,8 @@ function handle_(req) {
         return fail_('badpass', 'Usuário ou senha incorretos.');
       }
       clearFail_(fk);
+      const vc = verCheck_(req);
+      if (vc) return vc;
       if (!isActive_(row)) return fail_('blocked', 'Acesso bloqueado. Fale com o administrador.');
       if (row.dispositivo && row.dispositivo !== dev) {
         return fail_('device', 'Este usuário já está ligado a outro aparelho. Peça ao administrador para liberar.');
@@ -159,7 +185,7 @@ function handle_(req) {
       row.token = Utilities.getUuid();
       row.ultimoAcesso = now;
       save_(row);
-      return { ok: true, token: row.token, exp: Number(row.expiraEm), now: now, name: row.nome || '' };
+      return Object.assign({ ok: true, token: row.token, exp: Number(row.expiraEm), now: now, name: row.nome || '' }, extra_(row));
     } finally {
       lock.releaseLock();
     }
@@ -169,6 +195,8 @@ function handle_(req) {
     const row = find_(u);
     if (!row) return fail_('nouser', 'Usuário não encontrado.');
     if (!isActive_(row)) return fail_('blocked', 'Acesso bloqueado. Fale com o administrador.');
+    const vc2 = verCheck_(req);
+    if (vc2) return vc2;
     if (!row.token || row.token !== String(req.token || '')) {
       return fail_('token', 'Sua sessão foi encerrada. Entre novamente.');
     }
@@ -178,11 +206,18 @@ function handle_(req) {
     if (!row.expiraEm || Number(row.expiraEm) <= now) {
       return fail_('expired', 'Seu acesso venceu. Fale com o administrador.');
     }
-    if (now - (Number(row.ultimoAcesso) || 0) > 10 * 60 * 1000) {
+    if (req.offers !== undefined) {
+      row.versao = String(req.vname || req.ver || '');
+      row.ofertasHoje = Number(req.offers) || 0;
+      row.aceitasHoje = Number(req.acc) || 0;
+      row.diaStats = Utilities.formatDate(new Date(now), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+      row.ultimoAcesso = now;
+      save_(row);
+    } else if (now - (Number(row.ultimoAcesso) || 0) > 10 * 60 * 1000) {
       row.ultimoAcesso = now;
       save_(row);
     }
-    return { ok: true, exp: Number(row.expiraEm), now: now, name: row.nome || '' };
+    return Object.assign({ ok: true, exp: Number(row.expiraEm), now: now, name: row.nome || '' }, extra_(row));
   }
 
   return fail_('error', 'Pedido inválido.');
@@ -209,7 +244,10 @@ function pub_(o, now) {
     dias: Number(o.dias) || 0, contar: o.contar, expiraEm: exp, ativo: ativo, status: status,
     diasRestantes: exp ? Math.ceil((exp - now) / DIA) : null,
     aparelho: o.dispositivo ? String(o.dispositivo).slice(0, 6).toUpperCase() : '',
-    ultimoAcesso: Number(o.ultimoAcesso) || 0
+    ultimoAcesso: Number(o.ultimoAcesso) || 0,
+    aviso: o.aviso ? String(o.aviso) : '', versao: o.versao ? String(o.versao) : '',
+    ofertasHoje: Number(o.ofertasHoje) || 0, aceitasHoje: Number(o.aceitasHoje) || 0,
+    diaStats: o.diaStats ? String(o.diaStats) : ''
   };
 }
 
@@ -227,7 +265,25 @@ function adminApi(key, action, d) {
     if (action === 'list') {
       const users = readAll_().map(function (o) { return pub_(o, now); });
       users.sort(function (a, b) { return b.criadoEm - a.criadoEm; });
-      return { ok: true, now: now, users: users };
+      return { ok: true, now: now, users: users,
+        today: Utilities.formatDate(new Date(now), Session.getScriptTimeZone(), 'yyyy-MM-dd') };
+    }
+
+    if (action === 'getConfig') {
+      return { ok: true, cfg: cfg_() };
+    }
+
+    if (action === 'setConfig') {
+      const pr = PropertiesService.getScriptProperties();
+      pr.setProperty('AVISO', String(d.aviso || '').slice(0, 300));
+      pr.setProperty('MIN_VER', String(Math.max(0, parseInt(d.minVer, 10) || 0)));
+      const def = {};
+      ['green', 'yellow', 'minHour', 'maxPickup', 'minRating'].forEach(function (k) {
+        const v = parseFloat(String((d.defaults || {})[k]).replace(',', '.'));
+        if (!isNaN(v) && v > 0) def[k] = v;
+      });
+      pr.setProperty('DEFAULTS', JSON.stringify(def));
+      return { ok: true };
     }
 
     if (action === 'create') {
@@ -277,6 +333,8 @@ function adminApi(key, action, d) {
       if (p.length < 4 || p.length > 12) return fail_('erro', 'A senha deve ter de 4 a 12 números.');
       row.senhaHash = hash_(row.usuario, p);
       row.token = '';
+    } else if (action === 'setAviso') {
+      row.aviso = String(d.aviso || '').slice(0, 300);
     } else if (action === 'rename') {
       row.nome = String(d.nome || '').slice(0, 40);
     } else if (action === 'delete') {
@@ -311,8 +369,11 @@ h2{font-size:16px;margin:0 0 12px;font-weight:600}
 .mu{color:var(--mu);font-size:13px}
 .hide{display:none!important}
 .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-input{width:100%;background:#0c1322;border:1px solid var(--st);color:var(--tx);border-radius:12px;padding:12px;font-size:16px;margin:0 0 10px}
-input:focus{outline:none;border-color:var(--cy)}
+input,textarea{width:100%;font-family:inherit;background:#0c1322;border:1px solid var(--st);color:var(--tx);border-radius:12px;padding:12px;font-size:16px;margin:0 0 10px}
+input:focus,textarea:focus{outline:none;border-color:var(--cy)}
+textarea{resize:vertical;min-height:64px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.g2 label{font-size:12px;color:var(--mu);display:block;margin:0 0 4px}
 button{background:linear-gradient(90deg,var(--cy),#3b82f6);color:#04121a;border:0;border-radius:24px;padding:12px 18px;font-size:15px;font-weight:600}
 button.ghost{background:#17213a;color:var(--tx);border:1px solid var(--st)}
 button.sm{padding:8px 12px;font-size:13px;border-radius:16px}
@@ -386,13 +447,29 @@ pre{white-space:pre-wrap;background:#0c1322;border:1px solid var(--st);border-ra
 
   <div id="made" class="card hide"></div>
 
+  <div class="card">
+    <h2>Para todos os usuários</h2>
+    <label class="mu" style="font-size:12px">Aviso que aparece no app de todos (deixe vazio para não mostrar)</label>
+    <textarea id="cfgAviso" maxlength="300" placeholder="Ex.: Manutenção hoje às 22h."></textarea>
+    <div class="g2">
+      <div><label>Versão mínima (número do build)</label><input id="cfgMin" inputmode="numeric" placeholder="ex.: 120"></div>
+      <div><label>Nota mínima padrão</label><input id="cfgRating" inputmode="decimal" placeholder="ex.: 4.8"></div>
+      <div><label>Verde a partir de (R$/km)</label><input id="cfgGreen" inputmode="decimal" placeholder="ex.: 2.0"></div>
+      <div><label>Amarelo a partir de (R$/km)</label><input id="cfgYellow" inputmode="decimal" placeholder="ex.: 1.5"></div>
+      <div><label>R$/hora mínimo</label><input id="cfgHour" inputmode="decimal" placeholder="ex.: 40"></div>
+      <div><label>Busca máxima (km)</label><input id="cfgPick" inputmode="decimal" placeholder="ex.: 3"></div>
+    </div>
+    <p class="mu" style="font-size:12px;margin:0 0 10px">Os valores padrão só valem para quem ainda não mudou essa configuração no app. Versão mínima: quem estiver abaixo é bloqueado até atualizar.</p>
+    <button id="cfgSave" style="width:100%">Salvar para todos</button>
+  </div>
+
   <div class="chips" id="chips"></div>
   <input id="q" placeholder="Buscar por usuário ou nome">
   <div id="list"></div>
 </div>
 
 <script>
-var KEY='',USERS=[],NOW=0,FILTER='todos',CONTAR='hoje',LINK='__LINK__';
+var KEY='',USERS=[],NOW=0,TODAY='',FILTER='todos',CONTAR='hoje',LINK='__LINK__';
 function $(i){return document.getElementById(i);}
 function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
 function toast(m){var t=$('toast');t.textContent=m;t.className='show';setTimeout(function(){t.className='';},2800);}
@@ -441,10 +518,12 @@ function enter(){
   api('list',{},function(r){
     try{sessionStorage.setItem('k',KEY);}catch(e){}
     $('login').className='wrap center hide';$('app').className='wrap';
-    render(r);
+    render(r);loadCfg();
   },function(r){$('lerr').textContent=(r&&r.msg)||'Erro';});
 }
 function reload(){api('list',{},render);}
+function loadCfg(){api('getConfig',{},function(r){var c=r.cfg||{},d=c.defaults||{};$('cfgAviso').value=c.aviso||'';$('cfgMin').value=c.minVer||'';$('cfgGreen').value=d.green||'';$('cfgYellow').value=d.yellow||'';$('cfgHour').value=d.minHour||'';$('cfgPick').value=d.maxPickup||'';$('cfgRating').value=d.minRating||'';});}
+function saveCfg(){api('setConfig',{aviso:$('cfgAviso').value,minVer:$('cfgMin').value,defaults:{green:$('cfgGreen').value,yellow:$('cfgYellow').value,minHour:$('cfgHour').value,maxPickup:$('cfgPick').value,minRating:$('cfgRating').value}},function(){toast('Salvo para todos');});}
 
 function counts(){
   var c={ativos:0,vencendo:0,vencidos:0,bloqueados:0};
@@ -457,7 +536,7 @@ function counts(){
 }
 
 function render(r){
-  if(r){NOW=r.now;USERS=r.users;}
+  if(r){NOW=r.now;USERS=r.users;if(r.today)TODAY=r.today;}
   var c=counts(),st=$('stats');st.innerHTML='';
   [['Ativos',c.ativos,'var(--gr)'],['Vencendo',c.vencendo,'var(--am)'],['Vencidos',c.vencidos,'var(--rd)'],['Bloqueados',c.bloqueados,'var(--mu)']].forEach(function(x){
     var d=el('div','stat');var b=el('b',null,String(x[1]));b.style.color=x[2];d.appendChild(b);d.appendChild(el('span',null,x[0]));st.appendChild(d);
@@ -491,6 +570,9 @@ function card(u){
   else v='Vence em '+fdate(u.expiraEm)+' ('+u.diasRestantes+(u.diasRestantes===1?' dia)':' dias)');
   c.appendChild(el('p',null,v));
   c.appendChild(el('p',null,'Último acesso: '+ago(u.ultimoAcesso)+' · Aparelho: '+(u.aparelho?'vinculado ('+u.aparelho+')':'livre')));
+  var uso=u.versao?('Versão '+u.versao+(u.diaStats===TODAY?' · hoje: '+u.ofertasHoje+' ofertas, '+u.aceitasHoje+' aceitas':' · sem uso hoje')):'Sem dados de uso ainda';
+  c.appendChild(el('p',null,uso));
+  if(u.aviso)c.appendChild(el('p',null,'Aviso: '+u.aviso));
   var a=el('div','acts');
   function B(t,fn,cls){var b=el('button','ghost sm'+(cls?' '+cls:''),t);b.onclick=fn;a.appendChild(b);}
   B('+7 dias',function(){api('addDays',{u:u.usuario,n:7},function(){toast('+7 dias');reload();});});
@@ -500,6 +582,7 @@ function card(u){
   B(u.ativo?'Bloquear':'Desbloquear',function(){api('toggle',{u:u.usuario},function(){toast(u.ativo?'Bloqueado':'Desbloqueado');reload();});},u.ativo?'red':'');
   B('Liberar aparelho',function(){api('resetDevice',{u:u.usuario},function(){toast('Aparelho liberado');reload();});});
   B('Nova senha',function(){ask('Nova senha','Deixe vazio para gerar uma automática.','só números',true,'Trocar',function(v){var p=(v||'').replace(/\\D/g,'')||gen();api('resetPass',{u:u.usuario,p:p},function(){showMade(u.usuario,p,null,'Senha alterada');reload();});});});
+  B('Aviso',function(){ask('Aviso para este usuário','Aparece no app dele. Deixe vazio para usar o aviso geral.','texto',false,'Salvar',function(v){api('setAviso',{u:u.usuario,aviso:v},function(){toast('Aviso salvo');reload();});});});
   B('Nome',function(){ask('Nome','Aparece no app do usuário.','nome',false,'Salvar',function(v){api('rename',{u:u.usuario,nome:v},function(){reload();});});});
   B('Excluir',function(){ask('Excluir usuário','Apagar '+u.usuario+' para sempre?',null,false,'Excluir',function(){api('delete',{u:u.usuario},function(){toast('Excluído');reload();});});},'red');
   c.appendChild(a);
@@ -525,6 +608,7 @@ window.onload=function(){
   $('enter').onclick=enter;
   $('key').onkeydown=function(e){if(e.keyCode===13)enter();};
   $('out').onclick=logout;
+  $('cfgSave').onclick=saveCfg;
   $('gu').onclick=function(){$('nu').value=gen();};
   $('gp').onclick=function(){$('np').value=gen();};
   $('q').oninput=function(){render();};

@@ -79,6 +79,9 @@ class MainActivity : Activity() {
     private lateinit var minHourF: EditText
     private lateinit var maxPickupF: EditText
     private lateinit var costF: EditText
+    private lateinit var noticeBox: LinearLayout
+    private lateinit var noticeTv: TextView
+    private lateinit var picker: PositionPickerView
     private lateinit var greenF: EditText
     private lateinit var yellowF: EditText
     private lateinit var ratingF: EditText
@@ -262,8 +265,8 @@ class MainActivity : Activity() {
 
     private fun loadFields() {
         val sf = sfx()
-        greenF.setText(prefs.getFloat("green" + sf, prefs.getFloat("green", 2.0f)).toString())
-        yellowF.setText(prefs.getFloat("yellow" + sf, prefs.getFloat("yellow", 1.5f)).toString())
+        greenF.setText(prefs.getFloat("green" + sf, prefs.getFloat("green", License.dflt(this@MainActivity, "green", 2.0f))).toString())
+        yellowF.setText(prefs.getFloat("yellow" + sf, prefs.getFloat("yellow", License.dflt(this@MainActivity, "yellow", 1.5f))).toString())
         updateScale(false)
     }
 
@@ -323,6 +326,64 @@ class MainActivity : Activity() {
             val last = prefs.getString("lastShift", "") ?: ""
             shiftText.text = if (last.isEmpty()) "Inicie o turno para ver o ganho por hora real, contando o tempo parado." else last
             shiftBtn.text = "Iniciar turno"
+        }
+    }
+
+    private fun refreshNotice() {
+        if (!::noticeBox.isInitialized) return
+        val n = if (License.enabled(this)) License.notice(this) else ""
+        val seen = prefs.getString("noticeSeen", "") ?: ""
+        if (n.isNotEmpty() && n != seen) {
+            noticeTv.text = n
+            noticeBox.visibility = View.VISIBLE
+        } else {
+            noticeBox.visibility = View.GONE
+        }
+    }
+
+    private fun doBackup() {
+        Toast.makeText(this, "Gerando backup...", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val f = Backup.create(this)
+                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+                runOnUiThread {
+                    val i = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/zip"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(i, "Salvar ou enviar o backup"))
+                }
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    Toast.makeText(this, "Falha no backup: " + e.javaClass.simpleName, Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun pickBackup() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(i, 21)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 21 && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            Thread {
+                val msg = try {
+                    Backup.restore(this, uri)
+                } catch (e: Throwable) {
+                    "Falha ao restaurar: " + e.javaClass.simpleName
+                }
+                runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+            }.start()
         }
     }
 
@@ -427,6 +488,7 @@ class MainActivity : Activity() {
         if (!::statCount.isInitialized) return
         refreshLast()
         refreshGoalShift()
+        refreshNotice()
         val st = Stats.load(this)
         statCount.text = st.count.toString()
         if (st.count == 0) {
@@ -471,6 +533,7 @@ class MainActivity : Activity() {
 
     private fun refreshSeg() {
         val bottom = prefs.getBoolean("atBottom", false)
+        val custom = prefs.getFloat("cardY", -1f) >= 0f
         fun style(t: TextView, selected: Boolean) {
             if (selected) {
                 t.setTextColor(Color.parseColor("#04121A"))
@@ -483,8 +546,9 @@ class MainActivity : Activity() {
                 t.background = null
             }
         }
-        style(segTop, !bottom)
-        style(segBottom, bottom)
+        style(segTop, !bottom && !custom)
+        style(segBottom, bottom && !custom)
+        if (::picker.isInitialized) picker.reload()
     }
 
     private fun updatePreview() {
@@ -529,7 +593,7 @@ class MainActivity : Activity() {
         }
 
     private fun resetCardPrefs() {
-        prefs.edit().remove("textScale").remove("opacity").remove("atBottom").remove("vibrate").apply()
+        prefs.edit().remove("textScale").remove("opacity").remove("atBottom").remove("vibrate").remove("cardY").apply()
         seekSize.progress = 4
         seekOpacity.progress = 12
         tvSize.text = pct(1.0f)
@@ -676,9 +740,9 @@ class MainActivity : Activity() {
         window.statusBarColor = BG
         window.navigationBarColor = BG
 
-        greenF = input(prefs.getFloat("green", 2.0f).toString(), "Verde")
-        yellowF = input(prefs.getFloat("yellow", 1.5f).toString(), "Amarelo")
-        ratingF = input(prefs.getFloat("minRating", 4.8f).toString(), "Nota")
+        greenF = input(prefs.getFloat("green", License.dflt(this@MainActivity, "green", 2.0f)).toString(), "Verde")
+        yellowF = input(prefs.getFloat("yellow", License.dflt(this@MainActivity, "yellow", 1.5f)).toString(), "Amarelo")
+        ratingF = input(prefs.getFloat("minRating", License.dflt(this@MainActivity, "minRating", 4.8f)).toString(), "Nota")
         scale = ScaleView(this)
 
         val watcher = object : TextWatcher {
@@ -1016,13 +1080,13 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(dp(10), dp(11), dp(10), dp(11))
             isClickable = true
-            setOnClickListener { prefs.edit().putBoolean("atBottom", false).apply(); refreshSeg() }
+            setOnClickListener { prefs.edit().putBoolean("atBottom", false).remove("cardY").apply(); refreshSeg() }
         }
         segBottom = tv("Base", 14f, TEXT, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(10), dp(11), dp(10), dp(11))
             isClickable = true
-            setOnClickListener { prefs.edit().putBoolean("atBottom", true).apply(); refreshSeg() }
+            setOnClickListener { prefs.edit().putBoolean("atBottom", true).remove("cardY").apply(); refreshSeg() }
         }
         val seg = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1052,6 +1116,7 @@ class MainActivity : Activity() {
             prefs.edit().putBoolean("vibrate", it).apply()
         }
 
+        picker = PositionPickerView(this, prefs) { refreshSeg() }
         val drawerContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(40), dp(18), dp(28))
@@ -1072,7 +1137,9 @@ class MainActivity : Activity() {
             addView(previewBox, lp(bottom = 10))
             addView(chipRow, lp(bottom = 20))
             addView(tv("Posição na tela", 14f, TEXT, true), lp(bottom = 8))
-            addView(seg, lp(bottom = 20))
+            addView(seg, lp(bottom = 10))
+            addView(tv("Ou arraste o cartão para a altura que quiser:", 12f, MUTED), lp(bottom = 6))
+            addView(picker, lp(bottom = 20))
             addView(labelValueRow("Tamanho da letra", tvSize), lp(bottom = 4))
             addView(seekSize, lp(bottom = 16))
             addView(labelValueRow("Transparência", tvOpacity), lp(bottom = 4))
@@ -1130,8 +1197,8 @@ class MainActivity : Activity() {
         }
 
         // ---- decisao do cartao
-        minHourF = input(prefs.getFloat("minHour", 40f).toString(), "R$/h")
-        maxPickupF = input(prefs.getFloat("maxPickup", 3f).toString(), "km")
+        minHourF = input(prefs.getFloat("minHour", License.dflt(this@MainActivity, "minHour", 40f)).toString(), "R$/h")
+        maxPickupF = input(prefs.getFloat("maxPickup", License.dflt(this@MainActivity, "maxPickup", 3f)).toString(), "km")
         costF = input(prefs.getFloat("costKm", 0f).toString(), "R$/km")
         val decisao = card("Decisão do cartão") {
             addView(switchRow("Mostrar o veredito (Aceitar, Pensar, Recusar)", prefs.getBoolean("showVerdict", true)) {
@@ -1163,10 +1230,36 @@ class MainActivity : Activity() {
             }, lp())
         }
 
+        // ---- aviso do administrador
+        noticeTv = tv("", 14f, TEXT)
+        noticeBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = bg(Color.parseColor("#1A2744"), 18, CYAN)
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            visibility = View.GONE
+            addView(tv("Aviso do administrador", 12f, CYAN, true))
+            addView(noticeTv, lp(top = 4))
+            addView(button("Entendi", false) {
+                prefs.edit().putString("noticeSeen", License.notice(this@MainActivity)).apply()
+                refreshNotice()
+            }, lp(top = 10))
+        }
+
+        // ---- backup
+        val backupCard = card("Backup e restauração") {
+            addView(
+                tv("Guarda o histórico, os prints do histórico e as suas configurações em um arquivo. Restaurar junta com o que já existe, sem duplicar.", 12f, MUTED),
+                lp(bottom = 10)
+            )
+            addView(button("Fazer backup", false) { doBackup() }, lp(bottom = 8))
+            addView(button("Restaurar backup", false) { pickBackup() }, lp())
+        }
+
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(36), dp(18), dp(28))
             addView(header, lp(bottom = 6))
+            addView(noticeBox, lp(top = 8, bottom = 6))
             addView(hero, lp(bottom = 22))
             addView(resumo, lp(bottom = 14))
             addView(metas, lp(bottom = 14))
@@ -1174,6 +1267,7 @@ class MainActivity : Activity() {
             addView(decisao, lp(bottom = 14))
             addView(leitura, lp(bottom = 14))
             addView(update, lp(bottom = 14))
+            addView(backupCard, lp(bottom = 14))
             addView(diag, lp())
         }
         val scroll = ScrollView(this).apply {

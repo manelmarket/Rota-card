@@ -31,6 +31,26 @@ object License {
 
     fun enabled(ctx: Context): Boolean = url(ctx).startsWith("http")
 
+    @Suppress("DEPRECATION")
+    fun installedCode(ctx: Context): Int = try {
+        val i = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        if (android.os.Build.VERSION.SDK_INT >= 28) i.longVersionCode.toInt() else i.versionCode
+    } catch (_: Exception) { 0 }
+
+    fun versionName(ctx: Context): String = try {
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
+    } catch (_: Exception) { "?" }
+
+    /** O painel exigiu uma versao mais nova que a instalada. */
+    fun needsUpdate(ctx: Context): Boolean =
+        enabled(ctx) && prefs(ctx).getInt("minVer", 0) > installedCode(ctx)
+
+    fun notice(ctx: Context): String = prefs(ctx).getString("notice", "") ?: ""
+
+    /** Valor padrao definido pelo administrador no painel (ou o proprio "fb" se nao houver). */
+    fun dflt(ctx: Context, key: String, fb: Float): Float =
+        if (!enabled(ctx)) fb else prefs(ctx).getFloat("d_" + key, fb)
+
     fun deviceId(ctx: Context): String {
         val p = prefs(ctx)
         val saved = p.getString("dev", null)
@@ -66,6 +86,7 @@ object License {
     private fun compute(ctx: Context): Boolean {
         val p = prefs(ctx)
         if (p.getString("token", null).isNullOrBlank()) return false
+        if (p.getInt("minVer", 0) > installedCode(ctx)) return false
         val now = serverNow(ctx)
         if (now >= p.getLong("exp", 0L)) return false
         if (System.currentTimeMillis() - p.getLong("lastOk", 0L) > OFFLINE_GRACE) return false
@@ -126,6 +147,12 @@ object License {
         e.putLong("lastOk", System.currentTimeMillis())
         e.putLong("seen", now)
         e.putString("name", r.optString("name", ""))
+        e.putString("notice", r.optString("notice", ""))
+        e.putInt("minVer", r.optInt("minVer", 0))
+        val defs = r.optJSONObject("defaults")
+        for (k in listOf("green", "yellow", "minHour", "maxPickup", "minRating")) {
+            if (defs != null && defs.has(k)) e.putFloat("d_" + k, defs.optDouble(k).toFloat()) else e.remove("d_" + k)
+        }
         e.remove("lastMsg")
         e.apply()
         cacheAt = 0L
@@ -137,12 +164,18 @@ object License {
             val r = post(
                 ctx,
                 JSONObject().put("action", "login").put("u", user).put("p", pass).put("dev", deviceId(ctx))
+                    .put("ver", installedCode(ctx)).put("vname", versionName(ctx))
             )
             if (r.optBoolean("ok")) {
                 store(ctx, r, user, r.optString("token"))
                 LicResult(true, "")
             } else {
-                LicResult(false, r.optString("msg", "Não foi possível entrar."))
+                val msg = r.optString("msg", "Não foi possível entrar.")
+                if (r.optString("code") == "update") {
+                    prefs(ctx).edit().putInt("minVer", r.optInt("minVer", 0)).putString("lastMsg", msg).apply()
+                    cacheAt = 0L
+                }
+                LicResult(false, msg)
             }
         } catch (e: Exception) {
             LicResult(false, "Sem conexão com o servidor. Verifique a internet.", false)
@@ -159,6 +192,8 @@ object License {
             val r = post(
                 ctx,
                 JSONObject().put("action", "check").put("u", user(ctx)).put("dev", deviceId(ctx)).put("token", token)
+                    .put("ver", installedCode(ctx)).put("vname", versionName(ctx))
+                    .put("offers", Stats.load(ctx).count).put("acc", Stats.load(ctx).accepted)
             )
             if (r.optBoolean("ok")) {
                 store(ctx, r, null, null)
@@ -166,6 +201,11 @@ object License {
             } else {
                 val code = r.optString("code")
                 val msg = r.optString("msg", "Acesso encerrado.")
+                if (code == "update") {
+                    p.edit().putInt("minVer", r.optInt("minVer", 0)).putString("lastMsg", msg).apply()
+                    cacheAt = 0L
+                    return LicResult(false, msg)
+                }
                 if (code in DEFINITIVE) {
                     p.edit().remove("token").putString("lastMsg", msg).apply()
                     cacheAt = 0L

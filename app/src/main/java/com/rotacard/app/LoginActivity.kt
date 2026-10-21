@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.text.SpannableStringBuilder
@@ -35,6 +36,7 @@ class LoginActivity : Activity() {
     private lateinit var btn: TextView
     private lateinit var msg: TextView
     private var busy = false
+    private var updBtnRef: TextView? = null
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -126,6 +128,20 @@ class LoginActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
+        val updBtn = TextView(this).apply {
+            text = "Baixar atualização"
+            textSize = 15f
+            setTextColor(TEXT)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            background = bg(Color.parseColor("#17213A"), 28, STROKE)
+            visibility = if (License.needsUpdate(this@LoginActivity)) View.VISIBLE else View.GONE
+            isClickable = true
+            setOnClickListener {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/manelmarket/Rota-card/releases/latest")))
+            }
+        }
+        updBtnRef = updBtn
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -137,6 +153,7 @@ class LoginActivity : Activity() {
             addView(passF, lp(bottom = 12))
             addView(msg, lp(bottom = 12))
             addView(btn, lp())
+            addView(updBtn, lp(top = 12))
             addView(foot, lp(top = 26))
         }
         setContentView(ScrollView(this).apply {
@@ -179,6 +196,7 @@ class LoginActivity : Activity() {
                 } else {
                     msg.setTextColor(RED)
                     msg.text = r.msg
+                    updBtnRef?.visibility = if (License.needsUpdate(this)) View.VISIBLE else View.GONE
                     passF.setText("")
                 }
             }

@@ -23,6 +23,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -206,13 +207,15 @@ class HistoryActivity : Activity() {
         }
 
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val exportBtn = button("Exportar relatório", false) { askExport() }
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(36), dp(18), dp(28))
             addView(header, lp(bottom = 16))
             addView(chipRow, lp(bottom = 14))
-            addView(summary, lp(bottom = 16))
+            addView(summary, lp(bottom = 10))
+            addView(exportBtn, lp(bottom = 16))
             addView(listBox, lp())
         }
         val scroll = ScrollView(this).apply {
@@ -272,6 +275,60 @@ class HistoryActivity : Activity() {
     }
 
     // ------------------------------------------------------------ lista
+    private fun currentRides(): List<Ride> {
+        val all = History.load(this)
+        val cutoff = when (period) {
+            0 -> startOfToday()
+            1 -> startOfToday() - 6L * 24 * 3600 * 1000
+            else -> 0L
+        }
+        return all.filter { it.id >= cutoff }
+    }
+
+    private fun askExport() {
+        val rides = currentRides()
+        if (rides.isEmpty()) {
+            Toast.makeText(this, "Nenhuma corrida neste período", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = arrayOf("Planilha (CSV: abre no Excel e no Sheets)", "PDF resumido (tabela)", "PDF com os prints")
+        AlertDialog.Builder(this)
+            .setTitle("Exportar relatório")
+            .setItems(items) { _, which -> doExport(which, rides) }
+            .show()
+    }
+
+    private fun doExport(which: Int, rides: List<Ride>) {
+        Toast.makeText(this, "Gerando...", Toast.LENGTH_SHORT).show()
+        val label = arrayOf("Hoje", "Últimos 7 dias", "Tudo")[period]
+        Thread {
+            try {
+                val f: File
+                val mime: String
+                if (which == 0) {
+                    f = Report.csv(this, rides)
+                    mime = "text/csv"
+                } else {
+                    f = Report.pdf(this, rides, which == 2, label)
+                    mime = "application/pdf"
+                }
+                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+                runOnUiThread {
+                    val i = Intent(Intent.ACTION_SEND).apply {
+                        type = mime
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(i, "Enviar relatório"))
+                }
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    Toast.makeText(this, "Falha ao gerar: " + e.javaClass.simpleName, Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
     private fun styleChips() {
         chips.forEachIndexed { i, c ->
             val sel = i == period
