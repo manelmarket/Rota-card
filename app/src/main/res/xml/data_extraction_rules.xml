@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: o que vai para o backup automatico do Google (Drive) e para a troca de aparelho. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="history.json" />
+        <include domain="file" path="lights.json" />
+        <include domain="sharedpref" path="cfg.xml" />
+        <!-- a licenca fica de fora: ela e presa a este aparelho e nao pode ir para outro -->
+        <exclude domain="sharedpref" path="lic.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="history.json" />
+        <include domain="file" path="lights.json" />
+        <include domain="file" path="shots/" />
+        <include domain="sharedpref" path="cfg.xml" />
+        <exclude domain="sharedpref" path="lic.xml" />
+    </device-transfer>
+</data-extraction-rules>

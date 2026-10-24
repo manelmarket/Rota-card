@@ -103,6 +103,16 @@ object Haptics {
         } catch (_: Exception) {
         }
     }
+
+    /** Vibracao curta de confirmacao (marcacao do semaforo). */
+    @Suppress("DEPRECATION")
+    fun tap(ctx: Context) {
+        try {
+            val v = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+            v.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (_: Exception) {
+        }
+    }
 }
 
 /** O cartao em si. Usado pelo servico (por cima dos apps) e pela previa dentro do app. */
@@ -143,7 +153,8 @@ class CardUi(ctx: Context) {
     }
     private var lastScale = -1f
 
-    fun bind(o: Offer, s: CardSettings) {
+    /** base = R$/km medio do motorista neste app (null = nao mostrar a comparacao). */
+    fun bind(o: Offer, s: CardSettings, base: Double? = null) {
         val color = when (CardPrefs.level(o.perKm, s)) { 2 -> green; 1 -> amber; else -> red }
         val dark = Color.rgb(
             (Color.red(color) * 0.68f).toInt(),
@@ -187,13 +198,26 @@ class CardUi(ctx: Context) {
             ratingTxt, o.totalKm, til, o.totalMin, o.price, o.app
         ).replace('.', ',')
 
+        val parts = ArrayList<String>()
         if (s.showVerdict) {
-            val v = CardPrefs.verdict(o, s)
-            val net = CardPrefs.net(o, s)
-            verdictTv.visibility = View.VISIBLE
-            verdictTv.text = v.text + (if (net != null) "  •  líquido " + Fmt.money(net) else "")
-        } else {
+            parts.add(CardPrefs.verdict(o, s).text)
+            CardPrefs.net(o, s)?.let { parts.add("líquido " + Fmt.money(it)) }
+        }
+        if (base != null && base > 0.0) {
+            val d = Baseline.deltaPct(o.perKm, base)
+            parts.add(
+                when {
+                    d > 0 -> "▲ $d% acima da sua média"
+                    d < 0 -> "▼ ${-d}% abaixo da sua média"
+                    else -> "na sua média"
+                }
+            )
+        }
+        if (parts.isEmpty()) {
             verdictTv.visibility = View.GONE
+        } else {
+            verdictTv.visibility = View.VISIBLE
+            verdictTv.text = parts.joinToString("  •  ")
         }
     }
 }

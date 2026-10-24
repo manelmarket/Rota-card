@@ -51,6 +51,10 @@ class HistoryActivity : Activity() {
     private lateinit var mKm: TextView
     private lateinit var mHour: TextView
     private lateinit var mDist: TextView
+    private lateinit var chartBox: LinearLayout
+    private lateinit var chart: DailyBarsView
+    private lateinit var chartTitle: TextView
+    private lateinit var chartInfo: TextView
     private lateinit var listBox: LinearLayout
     private lateinit var scrim: View
     private lateinit var panel: ScrollView
@@ -206,6 +210,19 @@ class HistoryActivity : Activity() {
             )
         }
 
+        // ganho por dia (7 dias ou as ultimas 2 semanas)
+        chart = DailyBarsView(this)
+        chartTitle = tv("", 12f, MUTED)
+        chartInfo = tv("", 12f, MUTED)
+        chartBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = bg(SURFACE, 24, STROKE)
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            addView(chartTitle, lp(bottom = 8))
+            addView(chart, lp(bottom = 6))
+            addView(chartInfo, lp())
+        }
+
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val exportBtn = button("Exportar relatório", false) { askExport() }
 
@@ -215,6 +232,7 @@ class HistoryActivity : Activity() {
             addView(header, lp(bottom = 16))
             addView(chipRow, lp(bottom = 14))
             addView(summary, lp(bottom = 10))
+            addView(chartBox, lp(bottom = 10))
             addView(exportBtn, lp(bottom = 16))
             addView(listBox, lp())
         }
@@ -376,6 +394,7 @@ class HistoryActivity : Activity() {
         mKm.text = if (totalKm > 0.0) "R$ " + Fmt.d2(totalPrice / totalKm) else "--"
         mHour.text = if (hours > 0.0) "R$ " + Fmt.n0(timed.sumOf { it.price } / hours) else "--"
         mDist.text = if (totalKm > 0.0) Fmt.d1(totalKm) + " km" else "--"
+        renderChart(all)
 
         listBox.removeAllViews()
         if (rides.isEmpty()) {
@@ -396,6 +415,24 @@ class HistoryActivity : Activity() {
             }
             listBox.addView(rideRow(r), lp(bottom = 10))
         }
+    }
+
+    private fun renderChart(all: List<Ride>) {
+        if (period == 0) { chartBox.visibility = View.GONE; return }
+        val days = if (period == 1) 7 else 14
+        val bars = DailyBars.build(all, days)
+        if (bars.all { it.total <= 0.0 }) { chartBox.visibility = View.GONE; return }
+        chartBox.visibility = View.VISIBLE
+        chartTitle.text = if (days == 7) "Ganho por dia (7 dias)" else "Ganho por dia (últimas 2 semanas)"
+        chart.set(bars)
+        val worked = bars.filter { it.total > 0.0 }
+        val best = worked.maxByOrNull { it.total }
+        val bestHour = worked.filter { it.perHour != null }.maxByOrNull { it.perHour!! }
+        val parts = ArrayList<String>()
+        parts.add("média " + Fmt.money(worked.sumOf { it.total } / worked.size) + " por dia trabalhado")
+        if (best != null) parts.add("melhor: " + best.label + " (" + Fmt.money(best.total) + ")")
+        if (bestHour != null) parts.add("melhor R$/h: " + bestHour.label + " (R$ " + Fmt.n0(bestHour.perHour!!) + ")")
+        chartInfo.text = parts.joinToString("  •  ")
     }
 
     private fun loadThumb(r: Ride, iv: ImageView, band: Boolean) {

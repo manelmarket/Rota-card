@@ -1,3 +1,3 @@
 <resources>
-    <string name="service_desc">Le a tela da oferta de corrida (Uber, 99, Easymob) e mostra um cartao com o valor por km. Nada e salvo nem enviado.</string>
+    <string name="service_desc">Lê a oferta de corrida na tela do Uber, da 99 e do Easymob e mostra um cartão com o valor por km. Para ler a 99 e para guardar as corridas aceitas, o app tira prints da tela: os das corridas vão para a galeria (álbum RotaCard) e os das ofertas que não conseguiu ler ficam só dentro do app, por até 7 dias. O histórico e as configurações ficam no celular. Se o login estiver ativado, o app envia ao painel do administrador apenas o usuário, um código do aparelho, a versão do app e quantas ofertas viu e aceitou no dia. Nenhum print nem dado de passageiro é enviado.</string>
 </resources>

@@ -70,26 +70,49 @@ object History {
         val f = file(ctx)
         val out = mutableListOf<Ride>()
         if (!f.exists()) return out
-        try {
-            val arr = JSONArray(f.readText())
-            for (i in 0 until arr.length()) out.add(fromJson(arr.getJSONObject(i)))
-        } catch (_: Exception) { }
+        val text = f.readText()
+        val arr = try {
+            JSONArray(text)
+        } catch (e: Exception) {
+            // arquivo estragado: guarda uma copia e para, em vez de seguir com a lista vazia e
+            // apagar todo o historico na proxima gravacao
+            try { f.copyTo(File(ctx.filesDir, "history.corrupt-" + System.currentTimeMillis() + ".json"), true) } catch (_: Exception) { }
+            throw IllegalStateException("historico ilegivel", e)
+        }
+        for (i in 0 until arr.length()) {
+            try { out.add(fromJson(arr.getJSONObject(i))) } catch (_: Exception) { } // pula so o item ruim
+        }
         return out
     }
 
+    /** Grava num arquivo temporario e troca de uma vez: se o app morrer no meio, o historico antigo fica intacto. */
     private fun writeAll(ctx: Context, list: List<Ride>) {
         val arr = JSONArray()
         list.forEach { arr.put(toJson(it)) }
-        file(ctx).writeText(arr.toString())
+        val f = file(ctx)
+        val tmp = File(ctx.filesDir, "history.json.tmp")
+        tmp.writeText(arr.toString())
+        if (!tmp.renameTo(f)) {
+            f.writeText(arr.toString())
+            tmp.delete()
+        }
     }
 
-    /** Mais recente primeiro. */
-    fun load(ctx: Context): List<Ride> = synchronized(lock) { readAll(ctx).reversed() }
+    /** Mais recente primeiro. Se o arquivo estiver estragado, devolve vazio (a copia fica guardada). */
+    fun load(ctx: Context): List<Ride> = synchronized(lock) {
+        try { readAll(ctx).reversed() } catch (_: IllegalStateException) { emptyList() }
+    }
 
-    fun last(ctx: Context): Ride? = synchronized(lock) { readAll(ctx).lastOrNull() }
+    fun last(ctx: Context): Ride? = synchronized(lock) {
+        try { readAll(ctx).lastOrNull() } catch (_: IllegalStateException) { null }
+    }
+
+    /** Le para alterar: se o arquivo estiver estragado, recomeca do zero (a copia ja foi guardada por readAll). */
+    private fun readForWrite(ctx: Context): MutableList<Ride> =
+        try { readAll(ctx) } catch (_: IllegalStateException) { file(ctx).delete(); mutableListOf() }
 
     fun add(ctx: Context, r: Ride) = synchronized(lock) {
-        val list = readAll(ctx)
+        val list = readForWrite(ctx)
         list.add(r)
         while (list.size > MAX) {
             val old = list.removeAt(0)
@@ -100,7 +123,7 @@ object History {
 
     /** Junta ofertas de um backup sem duplicar (compara pelo id). Devolve quantas entraram. */
     fun merge(ctx: Context, json: String): Int = synchronized(lock) {
-        val cur = readAll(ctx)
+        val cur = readForWrite(ctx)
         val ids = HashSet<Long>()
         cur.forEach { ids.add(it.id) }
         var added = 0
@@ -125,7 +148,7 @@ object History {
     }
 
     fun delete(ctx: Context, id: Long) = synchronized(lock) {
-        val list = readAll(ctx)
+        val list = readForWrite(ctx)
         list.filter { it.id == id }.forEach { r -> r.shot?.let { shotFile(ctx, it).delete() } }
         writeAll(ctx, list.filter { it.id != id })
     }

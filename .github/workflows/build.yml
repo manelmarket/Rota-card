@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths-ignore:
       - '**.zip'
+      - '**.md'
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: write
@@ -21,7 +23,43 @@ jobs:
           gradle-version: 8.9
       - name: Definir versao
         run: echo "VERCODE=$((100 + GITHUB_RUN_NUMBER))" >> $GITHUB_ENV
+
+      # Testes primeiro: se o leitor de ofertas ou as regras de aceite quebrarem, nao sai versao nova.
+      - name: Testes (leitor de ofertas e regras de aceite)
+        run: |
+          set -o pipefail
+          gradle testDebugUnitTest --no-daemon -PverCode=$VERCODE 2>&1 | tee tests.log
+      - name: Resumo dos testes
+        if: always()
+        run: |
+          echo "### Testes" >> $GITHUB_STEP_SUMMARY
+          if grep -qE "FAILED|BUILD FAILED" tests.log 2>/dev/null; then
+            grep -E "FAILED|AssertionError|Expected|expected|^e: " tests.log | head -30 | while IFS= read -r line; do
+              echo "::error::$line"
+              echo "- \`$line\`" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "Todos os testes passaram." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Chave de assinatura propria (opcional). Crie os Secrets descritos no README para usar.
+      - name: Preparar chave de assinatura
+        env:
+          KS_B64: ${{ secrets.ROTACARD_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/rotacard.jks"
+            echo "ROTACARD_KEYSTORE=$RUNNER_TEMP/rotacard.jks" >> $GITHUB_ENV
+            echo "Assinando com a chave propria." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Assinando com a chave de depuracao do repositorio (sem Secret ROTACARD_KEYSTORE_BASE64)." >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Compilar
+        env:
+          ROTACARD_KEYSTORE_PASSWORD: ${{ secrets.ROTACARD_KEYSTORE_PASSWORD }}
+          ROTACARD_KEY_ALIAS: ${{ secrets.ROTACARD_KEY_ALIAS }}
+          ROTACARD_KEY_PASSWORD: ${{ secrets.ROTACARD_KEY_PASSWORD }}
         run: |
           set -o pipefail
           gradle assembleDebug --no-daemon -PverCode=$VERCODE 2>&1 | tee build.log
@@ -29,37 +67,30 @@ jobs:
         if: failure()
         run: |
           echo "### Erros de compilacao" >> $GITHUB_STEP_SUMMARY
-          grep -E "^e: " build.log | sed -E 's#file:///home/runner/work/[^/]+/[^/]+/##' | head -30 | while IFS= read -r line; do
+          grep -E "^e: " build.log 2>/dev/null | sed -E 's#file:///home/runner/work/[^/]+/[^/]+/##' | head -30 | while IFS= read -r line; do
             echo "::error::$line"
             echo "- \`$line\`" >> $GITHUB_STEP_SUMMARY
           done
-      - name: Testes do leitor de ofertas
-        continue-on-error: true
+      - name: Renomear APK e calcular o SHA-256
         run: |
-          set -o pipefail
-          gradle testDebugUnitTest --no-daemon -PverCode=$VERCODE 2>&1 | tee tests.log
-      - name: Resumo dos testes
-        if: always()
-        run: |
-          echo "### Testes do leitor" >> $GITHUB_STEP_SUMMARY
-          if grep -q "FAILED" tests.log 2>/dev/null; then
-            grep -E "FAILED|AssertionError|Expected|expected" tests.log | head -20 | while IFS= read -r line; do
-              echo "::warning::$line"
-              echo "- \`$line\`" >> $GITHUB_STEP_SUMMARY
-            done
-          else
-            echo "Todos os testes passaram." >> $GITHUB_STEP_SUMMARY
-          fi
-      - name: Renomear APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk RotaCard.apk
+          cp app/build/outputs/apk/debug/app-debug.apk RotaCard.apk
+          sha256sum RotaCard.apk | cut -d' ' -f1 > RotaCard.apk.sha256
+          echo "SHA-256: $(cat RotaCard.apk.sha256)" >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
           name: RotaCard-apk
-          path: RotaCard.apk
+          path: |
+            RotaCard.apk
+            RotaCard.apk.sha256
+
+      # So publica versao (e o app so oferece atualizacao) a partir da main. Pull requests so compilam e testam.
       - name: Publicar release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ env.VERCODE }}
           name: Rota Card build ${{ env.VERCODE }}
-          files: RotaCard.apk
+          files: |
+            RotaCard.apk
+            RotaCard.apk.sha256
           make_latest: true

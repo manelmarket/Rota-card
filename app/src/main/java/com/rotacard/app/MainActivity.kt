@@ -37,9 +37,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
-import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -56,8 +54,6 @@ class MainActivity : Activity() {
     private val GREEN = Color.parseColor("#22C55E")
     private val AMBER = Color.parseColor("#F59E0B")
     private val RED = Color.parseColor("#EF4444")
-
-    private val REPO = "manelmarket/Rota-card"
 
     private lateinit var prefs: SharedPreferences
     private lateinit var power: PowerView
@@ -87,7 +83,7 @@ class MainActivity : Activity() {
     private lateinit var ratingF: EditText
     private lateinit var updStatus: TextView
     private lateinit var updBtn: TextView
-    private var pendingUrl: String? = null
+    private var pendingUpdate: UpdateInfo? = null
     private val animators = mutableListOf<ObjectAnimator>()
     private val handler = Handler(Looper.getMainLooper())
 
@@ -554,7 +550,8 @@ class MainActivity : Activity() {
     private fun updatePreview() {
         if (!::previewUi.isInitialized) return
         val st = CardPrefs.load(this)
-        previewUi.bind(CardPrefs.sample(previewLevel, st), st)
+        val sample = CardPrefs.sample(previewLevel, st)
+        previewUi.bind(sample, st, if (prefs.getBoolean("compareAvg", true)) sample.perKm / 1.1 else null)
         previewUi.root.alpha = st.opacity
         val cols = intArrayOf(GREEN, AMBER, RED)
         chipViews.forEachIndexed { i, c ->
@@ -614,34 +611,15 @@ class MainActivity : Activity() {
         packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
     } catch (e: Exception) { "?" }
 
-    private fun checkUpdate(repo: String, manual: Boolean) {
+    private fun checkUpdate(manual: Boolean) {
         if (manual) updStatus.text = "Verificando..."
         Thread {
             try {
-                val conn = URL("https://api.github.com/repos/$repo/releases/latest")
-                    .openConnection() as HttpURLConnection
-                conn.setRequestProperty("Accept", "application/vnd.github+json")
-                conn.setRequestProperty("User-Agent", "RotaCard")
-                conn.connectTimeout = 10000
-                conn.readTimeout = 15000
-                if (conn.responseCode != 200) {
-                    val c = conn.responseCode
-                    runOnUiThread {
-                        if (manual) updStatus.text =
-                            "Não achei versão publicada (HTTP $c). Confira o nome do repositório."
-                    }
-                } else {
-                    val json = JSONObject(conn.inputStream.bufferedReader().readText())
-                    val code = json.getString("tag_name").substringAfterLast('-').toIntOrNull() ?: 0
-                    val assets = json.getJSONArray("assets")
-                    var url: String? = null
-                    for (i in 0 until assets.length()) {
-                        val a = assets.getJSONObject(i)
-                        if (a.getString("name").endsWith(".apk")) {
-                            url = a.getString("browser_download_url"); break
-                        }
-                    }
-                    runOnUiThread { showResult(code, url) }
+                val info = Updater.latest()
+                runOnUiThread { showResult(info) }
+            } catch (e: IllegalStateException) {
+                runOnUiThread {
+                    if (manual) updStatus.text = "Não achei versão publicada (${e.message}). Confira o nome do repositório."
                 }
             } catch (e: Exception) {
                 runOnUiThread { if (manual) updStatus.text = "Falha ao verificar. Confira a internet." }
@@ -649,22 +627,22 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun showResult(code: Int, url: String?) {
+    private fun showResult(info: UpdateInfo) {
         val mine = installedCode()
-        if (url != null && code > mine) {
-            pendingUrl = url
-            updBtn.text = "Baixar e instalar (build $code)"
-            updStatus.text = "Nova versão disponível: build $code. A sua é a $mine."
+        if (info.apkUrl != null && info.code > mine) {
+            pendingUpdate = info
+            updBtn.text = "Baixar e instalar (build ${info.code})"
+            updStatus.text = "Nova versão disponível: build ${info.code}. A sua é a $mine."
             updStatus.setTextColor(CYAN)
         } else {
-            pendingUrl = null
+            pendingUpdate = null
             updBtn.text = "Verificar atualização"
             updStatus.text = "Você está na versão mais recente (build $mine)."
             updStatus.setTextColor(MUTED)
         }
     }
 
-    private fun downloadAndInstall(url: String) {
+    private fun downloadAndInstall(info: UpdateInfo) {
         if (!packageManager.canRequestPackageInstalls()) {
             Toast.makeText(this, "Permita instalar apps por aqui e volte", Toast.LENGTH_LONG).show()
             startActivity(
@@ -675,50 +653,20 @@ class MainActivity : Activity() {
         updStatus.text = "Baixando..."
         Thread {
             try {
-                val dir = File(cacheDir, "updates"); dir.mkdirs()
-                val f = File(dir, "RotaCard.apk")
-                if (f.exists()) f.delete()
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.setRequestProperty("User-Agent", "RotaCard")
-                conn.connectTimeout = 15000
-                conn.readTimeout = 30000
-                val total = conn.contentLengthLong
-                conn.inputStream.use { input ->
-                    f.outputStream().use { out ->
-                        val buf = ByteArray(32768)
-                        var done = 0L
-                        var lastPct = -1
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n == -1) break
-                            out.write(buf, 0, n)
-                            done += n
-                            if (total > 0) {
-                                val pct = (done * 100 / total).toInt()
-                                if (pct / 10 != lastPct / 10) {
-                                    lastPct = pct
-                                    runOnUiThread { updStatus.text = "Baixando... $pct%" }
-                                }
-                            }
-                        }
-                    }
-                }
-                runOnUiThread { installApk(f) }
+                val f = Updater.download(this, info) { pct -> runOnUiThread { updStatus.text = "Baixando... $pct%" } }
+                runOnUiThread { installApk(f, info.shaUrl != null) }
+            } catch (e: SecurityException) {
+                runOnUiThread { updStatus.text = "Download descartado: ${e.message}. Tente de novo mais tarde." }
             } catch (e: Exception) {
                 runOnUiThread { updStatus.text = "Falha no download: ${e.javaClass.simpleName}" }
             }
         }.start()
     }
 
-    private fun installApk(f: File) {
+    private fun installApk(f: File, verified: Boolean) {
         try {
-            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
-            val i = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            updStatus.text = "Baixado. Confirme a instalação na tela do Android."
-            startActivity(i)
+            updStatus.text = (if (verified) "Baixado e conferido. " else "Baixado. ") + "Confirme a instalação na tela do Android."
+            startActivity(Updater.installIntent(this, f))
         } catch (e: Exception) {
             updStatus.text = "Não consegui abrir o instalador: ${e.javaClass.simpleName}"
         }
@@ -841,7 +789,7 @@ class MainActivity : Activity() {
 
         // ---- faixas de R$/km
         val appRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("Geral", "Uber", "99", "Easymob").forEachIndexed { i, name ->
+        (listOf("Geral") + Apps.ALL).forEachIndexed { i, name ->
             val c = tv(name, 13f, TEXT, true).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(6), dp(8), dp(6), dp(8))
@@ -897,13 +845,13 @@ class MainActivity : Activity() {
             addView(switchRow("Ler a 99 por imagem (OCR)", prefs.getBoolean("ocr99", true)) {
                 prefs.edit().putBoolean("ocr99", it).apply()
             }, lp())
-            addView(switchRow("Faixa preta de diagnóstico", prefs.getBoolean("debug", true)) {
+            addView(switchRow("Faixa preta de diagnóstico", prefs.getBoolean("debug", false)) {
                 prefs.edit().putBoolean("debug", it).apply()
             }, lp())
             addView(switchRow("Salvar print ao aceitar corrida", prefs.getBoolean("saveAccepted", true)) {
                 prefs.edit().putBoolean("saveAccepted", it).apply()
             }, lp())
-            addView(tv("Fica na galeria, no álbum RotaCard (pasta Pictures/RotaCard).", 12f, MUTED), lp(bottom = 8))
+            addView(tv("Fica na galeria, no álbum RotaCard (pasta Pictures/RotaCard). O print é o tirado enquanto a oferta estava na tela; se ela já tinha sumido, a corrida entra no histórico sem print.", 12f, MUTED), lp(bottom = 8))
             addView(switchRow("Easymob: reconhecer arrasto para a direita", prefs.getBoolean("easySwipe", true)) {
                 prefs.edit().putBoolean("easySwipe", it).apply()
             }, lp())
@@ -929,8 +877,8 @@ class MainActivity : Activity() {
         // ---- atualizacao
         updStatus = tv("", 13f, MUTED)
         updBtn = button("Verificar atualização", true) {
-            val url = pendingUrl
-            if (url != null) downloadAndInstall(url) else checkUpdate(REPO, true)
+            val info = pendingUpdate
+            if (info != null) downloadAndInstall(info) else checkUpdate(true)
         }
         val update = card("Atualização") {
             addView(updBtn, lp(bottom = 10))
@@ -1206,6 +1154,10 @@ class MainActivity : Activity() {
             }, lp())
             addView(switchRow("Falar o veredito em voz alta", prefs.getBoolean("voice", false)) {
                 prefs.edit().putBoolean("voice", it).apply()
+            }, lp())
+            addView(switchRow("Comparar com a minha média (últimos 30 dias)", prefs.getBoolean("compareAvg", true)) {
+                prefs.edit().putBoolean("compareAvg", it).apply()
+                updatePreview()
             }, lp(bottom = 8))
             addView(button("Testar voz", false) {
                 val svc = CardService.instance
@@ -1215,7 +1167,8 @@ class MainActivity : Activity() {
             addView(row(null, "R$/hora mínimo", minHourF), lp(bottom = 10))
             addView(row(null, "Busca máxima (km)", maxPickupF), lp(bottom = 10))
             addView(row(null, "Custo por km do carro (R$)", costF), lp(bottom = 6))
-            addView(tv("Com o custo por km, o cartão mostra o lucro líquido de cada corrida. Deixe 0 para desligar.", 12f, MUTED), lp(bottom = 12))
+            addView(tv("Com o custo por km, o cartão mostra o lucro líquido de cada corrida. Deixe 0 para desligar.", 12f, MUTED), lp(bottom = 6))
+            addView(tv("Como calcular: combustível (preço do litro ÷ km por litro) + uns R$ 0,15 a 0,30/km de desgaste (pneus, óleo, manutenção). Ex.: gasolina a R$ 6,00 num carro que faz 12 km/l = R$ 0,50/km; com desgaste, uns R$ 0,70/km.", 12f, MUTED), lp(bottom = 12))
             addView(button("Salvar decisão", true) {
                 try {
                     prefs.edit()
@@ -1245,10 +1198,18 @@ class MainActivity : Activity() {
             }, lp(top = 10))
         }
 
+        // ---- semaforos
+        val semaforos = card("Semáforos e navegação") {
+            addView(tv("Cadastre os semáforos da sua rota marcando quando abrem e fecham. Depois o app avisa, por cima do Waze, do Maps ou do app de corrida, se o próximo sinal deve estar verde ou vermelho e quanto falta.", 12f, MUTED), lp(bottom = 10))
+            addView(button("Abrir semáforos", true) {
+                startActivity(Intent(this@MainActivity, SemaforoActivity::class.java))
+            }, lp())
+        }
+
         // ---- backup
         val backupCard = card("Backup e restauração") {
             addView(
-                tv("Guarda o histórico, os prints do histórico e as suas configurações em um arquivo. Restaurar junta com o que já existe, sem duplicar.", 12f, MUTED),
+                tv("Guarda o histórico, os prints do histórico, os semáforos e as suas configurações em um arquivo. Restaurar junta com o que já existe, sem duplicar.", 12f, MUTED),
                 lp(bottom = 10)
             )
             addView(button("Fazer backup", false) { doBackup() }, lp(bottom = 8))
@@ -1263,6 +1224,7 @@ class MainActivity : Activity() {
             addView(hero, lp(bottom = 22))
             addView(resumo, lp(bottom = 14))
             addView(metas, lp(bottom = 14))
+            addView(semaforos, lp(bottom = 14))
             addView(faixas, lp(bottom = 14))
             addView(decisao, lp(bottom = 14))
             addView(leitura, lp(bottom = 14))
@@ -1298,6 +1260,6 @@ class MainActivity : Activity() {
             .setInterpolator(OvershootInterpolator(1.6f)).setDuration(650).start()
         scale.postDelayed({ updateScale(true) }, 350)
 
-        checkUpdate(REPO, false)
+        checkUpdate(false)
     }
 }

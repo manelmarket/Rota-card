@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 class HealthActivity : Activity() {
 
@@ -120,6 +121,12 @@ class HealthActivity : Activity() {
                 Health.clear(this@HealthActivity)
                 render()
             }, lp(top = 10))
+            addView(btn("Enviar prints das ofertas não lidas") { shareFailures() }, lp(top = 10))
+            addView(btn("Apagar prints das ofertas não lidas") {
+                ShotSaver.clearFailures(this@HealthActivity)
+                Toast.makeText(this@HealthActivity, "Prints apagados", Toast.LENGTH_SHORT).show()
+                render()
+            }, lp(top = 10))
         }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -181,6 +188,31 @@ class HealthActivity : Activity() {
         box.addView(line("Leituras por imagem (falharam)", fails.toString(), if (fails > 0) AMBER else TEXT))
         val unread = Health.get(this, "unread")
         box.addView(line("Ofertas não lidas (print guardado)", unread.toString(), if (unread > 0) AMBER else TEXT))
-        box.addView(tv("Os prints das ofertas não lidas ficam na galeria, álbum RotaCard/Falhas.", 11f, MUTED), lp(top = 4))
+        box.addView(line("Prints de ofertas não lidas guardados", ShotSaver.failureCount(this).toString(), TEXT))
+        box.addView(tv("Esses prints ficam só dentro do app (não vão para a galeria) e são apagados depois de 7 dias. Use \"Enviar prints\" para mandá-los a quem ajusta o leitor.", 11f, MUTED), lp(top = 4))
+    }
+
+    /** Junta os prints das ofertas nao lidas num zip e abre o "Compartilhar". */
+    private fun shareFailures() {
+        Thread {
+            try {
+                val f = ShotSaver.zipFailures(this)
+                runOnUiThread {
+                    if (f == null) {
+                        Toast.makeText(this, "Nenhum print guardado", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+                        val i = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/zip"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(Intent.createChooser(i, "Enviar prints"))
+                    }
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { Toast.makeText(this, "Falha: " + e.javaClass.simpleName, Toast.LENGTH_LONG).show() }
+            }
+        }.start()
     }
 }

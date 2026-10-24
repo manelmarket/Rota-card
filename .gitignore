@@ -1,0 +1,20 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+local.properties
+captures/
+*.iml
+.idea/
+.DS_Store
+
+# Saidas
+*.apk
+*.aab
+*.apk.sha256
+*.zip
+*.log
+
+# Chaves proprias (a chave de depuracao app/debug.keystore continua no repositorio de proposito, ver README)
+*.jks
+release.keystore

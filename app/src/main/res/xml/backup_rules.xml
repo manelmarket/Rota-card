@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 8 a 11: backup automatico do Google (Drive). Sem a licenca e sem os prints (limite de 25 MB). -->
+<full-backup-content>
+    <include domain="file" path="history.json" />
+    <include domain="file" path="lights.json" />
+    <include domain="sharedpref" path="cfg.xml" />
+    <exclude domain="sharedpref" path="lic.xml" />
+</full-backup-content>

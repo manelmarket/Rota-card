@@ -11,6 +11,7 @@
  */
 
 const ABA = 'usuarios';
+const ABA_LOG = 'registro';
 const COLS = ['usuario', 'senhaHash', 'nome', 'criadoEm', 'dias', 'contar', 'expiraEm', 'expiraEmTexto',
   'ativo', 'dispositivo', 'token', 'ultimoAcesso', 'aviso', 'versao', 'ofertasHoje', 'aceitasHoje', 'diaStats'];
 const DIA = 24 * 60 * 60 * 1000;
@@ -45,21 +46,49 @@ function readAll_() {
   const n = sh.getLastRow();
   if (n < 2) return [];
   const vals = sh.getRange(2, 1, n - 1, COLS.length).getValues();
-  return vals.map(function (v, i) {
-    const o = { _row: i + 2 };
-    COLS.forEach(function (c, j) { o[c] = v[j]; });
-    o.usuario = String(o.usuario);
-    o.dispositivo = String(o.dispositivo || '');
-    o.token = String(o.token || '');
-    return o;
-  });
+  return vals.map(function (v, i) { return rowObj_(v, i + 2); });
 }
 
+function rowObj_(v, row) {
+  const o = { _row: row };
+  COLS.forEach(function (c, j) { o[c] = v[j]; });
+  o.usuario = String(o.usuario);
+  o.dispositivo = String(o.dispositivo || '');
+  o.token = String(o.token || '');
+  return o;
+}
+
+/* Acha o usuario pela coluna A sem ler a planilha inteira (rapido mesmo com muitos usuarios). */
 function find_(u) {
-  u = String(u);
-  const all = readAll_();
-  for (let i = 0; i < all.length; i++) if (all[i].usuario === u) return all[i];
-  return null;
+  u = String(u || '');
+  if (!u) return null;
+  const sh = sheet_();
+  const n = sh.getLastRow();
+  if (n < 2) return null;
+  const cell = sh.getRange(2, 1, n - 1, 1).createTextFinder(u).matchEntireCell(true).matchCase(true).findNext();
+  if (!cell) return null;
+  const r = cell.getRow();
+  const o = rowObj_(sh.getRange(r, 1, 1, COLS.length).getValues()[0], r);
+  return o.usuario === u ? o : null;
+}
+
+/* Registro das acoes do administrador (aba "registro"). Nunca grava senhas. */
+function audit_(action, d) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sh = ss.getSheetByName(ABA_LOG);
+    if (!sh) {
+      sh = ss.insertSheet(ABA_LOG);
+      sh.getRange(1, 1, 1, 4).setValues([['quando', 'acao', 'usuario', 'detalhe']]);
+      sh.setFrozenRows(1);
+    }
+    const copy = {};
+    Object.keys(d || {}).forEach(function (k) { if (k !== 'p' && k !== 'u') copy[k] = d[k]; });
+    sh.appendRow([fmt_(Date.now()), action, String((d && d.u) || ''), JSON.stringify(copy).slice(0, 300)]);
+    // guarda so os ultimos 2000 registros
+    const extra = sh.getLastRow() - 2001;
+    if (extra > 0) sh.deleteRows(2, extra);
+  } catch (e) { }
 }
 
 function save_(o) {
@@ -261,6 +290,7 @@ function adminApi(key, action, d) {
   const now = Date.now();
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
+  if (action !== 'list' && action !== 'getConfig') audit_(action, d);
   try {
     if (action === 'list') {
       const users = readAll_().map(function (o) { return pub_(o, now); });

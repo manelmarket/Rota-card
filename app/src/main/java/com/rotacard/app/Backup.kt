@@ -13,7 +13,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-/** Backup (zip) com o historico, os prints do historico e as configuracoes. */
+/** Backup (zip) com o historico, os prints do historico, os semaforos e as configuracoes. */
 object Backup {
     private val SKIP = setOf(
         "dev", "last", "fail", "ocr", "ocrfail", "clicks", "lasterr", "easylog", "post", "noticeSeen", "repo"
@@ -28,6 +28,7 @@ object Backup {
             val hf = File(ctx.filesDir, "history.json")
             if (hf.exists()) put(z, "history.json", hf.readBytes())
             put(z, "settings.json", settingsJson(ctx).toByteArray(Charsets.UTF_8))
+            put(z, "lights.json", LightStore.exportJson(ctx).toByteArray(Charsets.UTF_8))
             val sd = File(ctx.filesDir, "shots")
             sd.listFiles()?.forEach { f ->
                 if (f.isFile) put(z, "shots/" + f.name, f.readBytes())
@@ -83,6 +84,7 @@ object Backup {
     fun restore(ctx: Context, uri: Uri): String {
         var hist: ByteArray? = null
         var settings: ByteArray? = null
+        var lights: ByteArray? = null
         val opened = ctx.contentResolver.openInputStream(uri) ?: return "Não consegui abrir o arquivo."
         opened.use { ins ->
             ZipInputStream(ins).use { z ->
@@ -94,6 +96,8 @@ object Backup {
                         hist = data
                     } else if (name == "settings.json") {
                         settings = data
+                    } else if (name == "lights.json") {
+                        lights = data
                     } else if (name.startsWith("shots/") && !name.contains("..")) {
                         val f = File(File(ctx.filesDir, "shots"), name.removePrefix("shots/"))
                         f.parentFile?.mkdirs()
@@ -110,6 +114,8 @@ object Backup {
         var added = 0
         if (h != null) added = History.merge(ctx, String(h, Charsets.UTF_8))
         if (s != null) applySettings(ctx, String(s, Charsets.UTF_8))
-        return "Restaurado: $added corridas novas e as configurações. Feche e abra o app."
+        val lg = lights
+        val newLights = if (lg != null) LightStore.merge(ctx, String(lg, Charsets.UTF_8)) else 0
+        return "Restaurado: $added corridas novas, $newLights semáforos novos e as configurações. Feche e abra o app."
     }
 }
